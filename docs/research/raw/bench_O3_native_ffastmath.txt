@@ -1,0 +1,124 @@
+# pinned cpu=2 running_on=2
+# flashvec bench: cfg=O3_native_ffastmath
+# build: 12.4.0 Oct 17 2026
+# n_full=1048576 n_mid=65536 n_small=8192 reps=100 reps_mid=400 reps_small=4000 trials=5 checks=8192
+# avx2=yes fma=1
+# compiled_features: avx2=1 fma=1 fast_math=1
+# tsc_hz=1796553216 (1.797 GHz) cpu_khz_before=3671716
+DIFF cfg=O3_native_ffastmath tier=tier1 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O3_native_ffastmath tier=tier2 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier2 op=add n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native_ffastmath tier=tier3 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier3 op=add n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native_ffastmath tier=tier1 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O3_native_ffastmath tier=tier2 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier2 op=scale n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native_ffastmath tier=tier3 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier3 op=scale n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native_ffastmath tier=tier1 op=dot n=8192 scalar=-30.3377914 ref=-30.3377762 rel=5.030e-07
+DIFF cfg=O3_native_ffastmath tier=tier2 op=dot n=8192 scalar=-30.3378334 ref=-30.3377762 rel=1.886e-06
+DIFF cfg=O3_native_ffastmath tier=tier3 op=dot n=8192 scalar=-30.3378315 ref=-30.3377762 rel=1.823e-06
+DIFF cfg=O3_native_ffastmath tier=tier3hadd op=dot n=8192 scalar=-30.3378277 ref=-30.3377762 rel=1.698e-06
+DIFF cfg=O3_native_ffastmath tier=tier3_4acc op=dot n=8192 scalar=-30.3378124 ref=-30.3377762 rel=1.195e-06
+DIFF cfg=O3_native_ffastmath tier=tier1 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+DIFF cfg=O3_native_ffastmath tier=tier2 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier2 op=dot_elem n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native_ffastmath tier=tier3 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier3 op=dot_elem n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native_ffastmath tier=tier1 op=len n=8192 max_abs=1.192e-07 max_rel=1.192e-07 n_diff=690 n_nan=0
+DIFF cfg=O3_native_ffastmath tier=tier2 op=len n=8192 max_abs=2.384e-07 max_rel=2.049e-07 n_diff=2876 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier2 op=len n=8192 bits_equal=0 n_diff=2619
+DIFF cfg=O3_native_ffastmath tier=tier3 op=len n=8192 max_abs=1.192e-07 max_rel=1.192e-07 n_diff=690 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier3 op=len n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native_ffastmath tier=tier1 op=normalize n=8192 max_abs=2.384e-07 max_rel=2.448e-07 n_diff=3288 n_nan=0
+DIFF cfg=O3_native_ffastmath tier=tier2 op=normalize n=8192 max_abs=2.384e-07 max_rel=2.448e-07 n_diff=3288 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier2 op=normalize n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native_ffastmath tier=tier3 op=normalize n=8192 max_abs=2.384e-07 max_rel=2.731e-07 n_diff=2895 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier3 op=normalize n=8192 bits_equal=0 n_diff=3552
+DIFF cfg=O3_native_ffastmath tier=tier3_rsqrt op=normalize n=8192 max_abs=2.384e-07 max_rel=2.624e-07 n_diff=3342 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier3_rsqrt op=normalize n=8192 bits_equal=0 n_diff=402
+DIFF cfg=O3_native_ffastmath tier=tier1 op=collision n=8192 max_abs=1.431e-06 max_rel=9.563e-07 n_diff=4153 n_nan=0
+DIFF cfg=O3_native_ffastmath tier=tier2 op=collision n=8192 max_abs=1.669e-06 max_rel=9.563e-07 n_diff=6614 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier2 op=collision n=8192 bits_equal=0 n_diff=4937
+DIFF cfg=O3_native_ffastmath tier=tier3 op=collision n=8192 max_abs=1.669e-06 max_rel=1.045e-06 n_diff=6482 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier3 op=collision n=8192 bits_equal=0 n_diff=6286
+DIFF cfg=O3_native_ffastmath tier=tier3_rsqrt op=collision n=8192 max_abs=1.669e-06 max_rel=9.563e-07 n_diff=6615 n_nan=0
+IDENT cfg=O3_native_ffastmath tier=tier3_rsqrt op=collision n=8192 bits_equal=0 n_diff=5080
+# loadavg_before=3.23 3.66 4.02 4/2603 156693
+CASE cfg=O3_native_ffastmath tier=tier1 op=add n=8192 reps=4000 med_ns=14696.4 min_ns=14019.9 ns_elem=1.7940 ns_elem_min=1.7114 gbps=13.38 chk=145.033 trials_ns= 15215.8 14696.4 15236.9 14027.2 14019.9
+CASE cfg=O3_native_ffastmath tier=tier1 op=scale n=8192 reps=4000 med_ns=17749.3 min_ns=17593.4 ns_elem=2.1667 ns_elem_min=2.1476 gbps=7.38 chk=238.254 trials_ns= 18079.7 17749.3 17829.6 17631.8 17593.4
+CASE cfg=O3_native_ffastmath tier=tier1 op=dot n=8192 reps=4000 med_ns=22246.6 min_ns=21999.2 ns_elem=2.7157 ns_elem_min=2.6854 gbps=5.89 chk=-151.689 trials_ns= 22395.3 22246.6 22188.0 22315.1 21999.2
+CASE cfg=O3_native_ffastmath tier=tier1 op=dot_elem n=8192 reps=4000 med_ns=14587.8 min_ns=14402.0 ns_elem=1.7807 ns_elem_min=1.7581 gbps=11.23 chk=-303.378 trials_ns= 14402.0 14587.8 14407.6 14696.5 14694.5
+CASE cfg=O3_native_ffastmath tier=tier1 op=len n=8192 reps=4000 med_ns=14416.9 min_ns=14310.6 ns_elem=1.7599 ns_elem_min=1.7469 gbps=11.36 chk=31466 trials_ns= 14585.6 14416.2 14540.9 14310.6 14416.9
+CASE cfg=O3_native_ffastmath tier=tier1 op=normalize n=8192 reps=4000 med_ns=22199.0 min_ns=20525.1 ns_elem=2.7098 ns_elem_min=2.5055 gbps=5.90 chk=714.896 trials_ns= 20525.1 22234.7 22199.0 22122.6 22601.5
+CASE cfg=O3_native_ffastmath tier=tier1 op=collision n=8192 reps=4000 med_ns=62319.3 min_ns=55660.0 ns_elem=7.6073 ns_elem_min=6.7944 gbps=4.21 chk=-1006.58 trials_ns= 64198.6 59856.7 63587.2 62319.3 55660.0
+CASE cfg=O3_native_ffastmath tier=tier2 op=add n=8192 reps=4000 med_ns=1964.9 min_ns=1935.3 ns_elem=0.2399 ns_elem_min=0.2362 gbps=100.06 chk=145.034 trials_ns= 2007.8 1964.9 1988.0 1935.3 1943.5
+CASE cfg=O3_native_ffastmath tier=tier2 op=scale n=8192 reps=4000 med_ns=1366.9 min_ns=1355.1 ns_elem=0.1669 ns_elem_min=0.1654 gbps=95.89 chk=238.254 trials_ns= 1355.1 1445.1 1385.3 1366.9 1358.4
+CASE cfg=O3_native_ffastmath tier=tier2 op=dot n=8192 reps=4000 med_ns=1191.5 min_ns=1155.4 ns_elem=0.1454 ns_elem_min=0.1410 gbps=110.01 chk=-151.689 trials_ns= 1155.4 1165.1 1191.5 1195.2 1202.0
+CASE cfg=O3_native_ffastmath tier=tier2 op=dot_elem n=8192 reps=4000 med_ns=1752.9 min_ns=1722.7 ns_elem=0.2140 ns_elem_min=0.2103 gbps=93.47 chk=-303.378 trials_ns= 1839.3 1752.9 1733.2 1762.6 1722.7
+CASE cfg=O3_native_ffastmath tier=tier2 op=len n=8192 reps=4000 med_ns=2262.6 min_ns=2251.7 ns_elem=0.2762 ns_elem_min=0.2749 gbps=72.41 chk=31466 trials_ns= 2334.8 2255.4 2251.7 2316.7 2262.6
+CASE cfg=O3_native_ffastmath tier=tier2 op=normalize n=8192 reps=4000 med_ns=2503.9 min_ns=2392.3 ns_elem=0.3056 ns_elem_min=0.2920 gbps=52.35 chk=714.896 trials_ns= 2456.7 2658.0 2659.4 2392.3 2503.9
+CASE cfg=O3_native_ffastmath tier=tier2 op=collision n=8192 reps=4000 med_ns=4865.3 min_ns=4801.6 ns_elem=0.5939 ns_elem_min=0.5861 gbps=53.88 chk=-1006.58 trials_ns= 4865.3 4914.3 4841.0 4801.6 4926.6
+CASE cfg=O3_native_ffastmath tier=tier3 op=add n=8192 reps=4000 med_ns=1974.4 min_ns=1940.6 ns_elem=0.2410 ns_elem_min=0.2369 gbps=99.58 chk=145.034 trials_ns= 1974.4 1994.5 1988.1 1942.6 1940.6
+CASE cfg=O3_native_ffastmath tier=tier3 op=scale n=8192 reps=4000 med_ns=1382.1 min_ns=1358.2 ns_elem=0.1687 ns_elem_min=0.1658 gbps=94.83 chk=238.254 trials_ns= 1358.2 1389.6 1391.0 1379.4 1382.1
+CASE cfg=O3_native_ffastmath tier=tier3 op=dot n=8192 reps=4000 med_ns=2535.3 min_ns=2473.2 ns_elem=0.3095 ns_elem_min=0.3019 gbps=51.70 chk=-151.689 trials_ns= 2802.4 2595.9 2535.3 2486.9 2473.2
+CASE cfg=O3_native_ffastmath tier=tier3hadd op=dot n=8192 reps=4000 med_ns=2212.1 min_ns=1921.5 ns_elem=0.2700 ns_elem_min=0.2346 gbps=59.25 chk=-151.689 trials_ns= 1921.5 2087.6 2212.1 2293.8 2226.7
+CASE cfg=O3_native_ffastmath tier=tier3_4acc op=dot n=8192 reps=4000 med_ns=1169.3 min_ns=1161.1 ns_elem=0.1427 ns_elem_min=0.1417 gbps=112.10 chk=-151.689 trials_ns= 1225.7 1195.4 1169.3 1161.1 1165.9
+CASE cfg=O3_native_ffastmath tier=tier3 op=dot_elem n=8192 reps=4000 med_ns=1764.9 min_ns=1722.1 ns_elem=0.2154 ns_elem_min=0.2102 gbps=92.83 chk=-303.378 trials_ns= 1722.1 1763.0 1764.9 1826.2 1794.7
+CASE cfg=O3_native_ffastmath tier=tier3 op=len n=8192 reps=4000 med_ns=1717.7 min_ns=1668.2 ns_elem=0.2097 ns_elem_min=0.2036 gbps=95.38 chk=31466 trials_ns= 1668.2 1686.7 1738.8 1717.7 1723.8
+CASE cfg=O3_native_ffastmath tier=tier3 op=normalize n=8192 reps=4000 med_ns=3339.5 min_ns=3313.9 ns_elem=0.4077 ns_elem_min=0.4045 gbps=39.25 chk=714.896 trials_ns= 3515.1 3410.7 3313.9 3339.5 3337.4
+CASE cfg=O3_native_ffastmath tier=tier3_rsqrt op=normalize n=8192 reps=4000 med_ns=2580.2 min_ns=2515.8 ns_elem=0.3150 ns_elem_min=0.3071 gbps=50.80 chk=714.896 trials_ns= 2515.8 2540.4 2584.9 2605.8 2580.2
+CASE cfg=O3_native_ffastmath tier=tier3 op=collision n=8192 reps=4000 med_ns=5074.4 min_ns=5035.4 ns_elem=0.6194 ns_elem_min=0.6147 gbps=51.66 chk=-1006.58 trials_ns= 5211.1 5099.1 5052.0 5074.4 5035.4
+CASE cfg=O3_native_ffastmath tier=tier3_rsqrt op=collision n=8192 reps=4000 med_ns=4617.6 min_ns=4478.5 ns_elem=0.5637 ns_elem_min=0.5467 gbps=56.77 chk=-1006.58 trials_ns= 4833.2 4482.7 4618.8 4617.6 4478.5
+CASE cfg=O3_native_ffastmath tier=tier1 op=add n=65536 reps=400 med_ns=110143.1 min_ns=109284.0 ns_elem=1.6807 ns_elem_min=1.6675 gbps=14.28 chk=1537.43 trials_ns= 110143.1 109284.0 109720.2 112391.8 113535.5
+CASE cfg=O3_native_ffastmath tier=tier1 op=scale n=65536 reps=400 med_ns=143314.3 min_ns=140758.1 ns_elem=2.1868 ns_elem_min=2.1478 gbps=7.32 chk=931.83 trials_ns= 142388.7 140758.1 147336.6 143493.4 143314.3
+CASE cfg=O3_native_ffastmath tier=tier1 op=dot n=65536 reps=400 med_ns=180284.0 min_ns=180034.2 ns_elem=2.7509 ns_elem_min=2.7471 gbps=5.82 chk=-1103.52 trials_ns= 181548.9 180284.0 180873.3 180115.5 180034.2
+CASE cfg=O3_native_ffastmath tier=tier1 op=dot_elem n=65536 reps=400 med_ns=122789.4 min_ns=118664.6 ns_elem=1.8736 ns_elem_min=1.8107 gbps=10.67 chk=-2207.04 trials_ns= 118664.6 123602.8 126474.5 121315.4 122789.4
+CASE cfg=O3_native_ffastmath tier=tier1 op=len n=65536 reps=400 med_ns=118552.4 min_ns=116387.8 ns_elem=1.8090 ns_elem_min=1.7759 gbps=11.06 chk=250962 trials_ns= 118552.4 118771.9 119626.6 118531.8 116387.8
+CASE cfg=O3_native_ffastmath tier=tier1 op=normalize n=65536 reps=400 med_ns=168042.4 min_ns=166026.4 ns_elem=2.5641 ns_elem_min=2.5334 gbps=6.24 chk=2061.72 trials_ns= 170992.8 168042.4 166026.4 170995.8 166204.2
+CASE cfg=O3_native_ffastmath tier=tier1 op=collision n=65536 reps=400 med_ns=530319.9 min_ns=488164.4 ns_elem=8.0920 ns_elem_min=7.4488 gbps=3.95 chk=84.264 trials_ns= 541462.3 531777.9 530225.4 488164.4 530319.9
+CASE cfg=O3_native_ffastmath tier=tier2 op=add n=65536 reps=400 med_ns=20717.8 min_ns=19354.7 ns_elem=0.3161 ns_elem_min=0.2953 gbps=75.92 chk=1537.44 trials_ns= 20853.2 26212.0 19354.7 19658.9 20717.8
+CASE cfg=O3_native_ffastmath tier=tier2 op=scale n=65536 reps=400 med_ns=14834.0 min_ns=13876.9 ns_elem=0.2263 ns_elem_min=0.2117 gbps=70.69 chk=931.83 trials_ns= 16638.4 13876.9 14834.0 14523.6 16508.0
+CASE cfg=O3_native_ffastmath tier=tier2 op=dot n=65536 reps=400 med_ns=12211.2 min_ns=11230.7 ns_elem=0.1863 ns_elem_min=0.1714 gbps=85.87 chk=-1103.52 trials_ns= 21189.8 11230.7 12171.3 12211.2 16802.4
+CASE cfg=O3_native_ffastmath tier=tier2 op=dot_elem n=65536 reps=400 med_ns=18570.8 min_ns=18369.1 ns_elem=0.2834 ns_elem_min=0.2803 gbps=70.58 chk=-2207.04 trials_ns= 26807.6 18369.1 18563.2 22381.6 18570.8
+CASE cfg=O3_native_ffastmath tier=tier2 op=len n=65536 reps=400 med_ns=20847.6 min_ns=19519.9 ns_elem=0.3181 ns_elem_min=0.2979 gbps=62.87 chk=250962 trials_ns= 19519.9 20906.8 22504.7 20684.6 20847.6
+CASE cfg=O3_native_ffastmath tier=tier2 op=normalize n=65536 reps=400 med_ns=21173.1 min_ns=20817.6 ns_elem=0.3231 ns_elem_min=0.3177 gbps=49.52 chk=2061.72 trials_ns= 23235.8 21173.1 20817.6 23902.3 20929.3
+CASE cfg=O3_native_ffastmath tier=tier2 op=collision n=65536 reps=400 med_ns=46040.0 min_ns=38778.6 ns_elem=0.7025 ns_elem_min=0.5917 gbps=45.55 chk=84.2641 trials_ns= 46040.0 41810.6 51105.6 38778.6 48220.2
+CASE cfg=O3_native_ffastmath tier=tier3 op=add n=65536 reps=400 med_ns=22080.8 min_ns=20151.1 ns_elem=0.3369 ns_elem_min=0.3075 gbps=71.23 chk=1537.44 trials_ns= 22080.8 33154.0 20817.2 20151.1 23379.9
+CASE cfg=O3_native_ffastmath tier=tier3 op=scale n=65536 reps=400 med_ns=16082.9 min_ns=14816.5 ns_elem=0.2454 ns_elem_min=0.2261 gbps=65.20 chk=931.83 trials_ns= 16405.2 14816.5 15209.9 16082.9 17426.3
+CASE cfg=O3_native_ffastmath tier=tier3 op=dot n=65536 reps=400 med_ns=22039.0 min_ns=21251.2 ns_elem=0.3363 ns_elem_min=0.3243 gbps=47.58 chk=-1103.52 trials_ns= 22830.2 22039.0 23743.2 21764.8 21251.2
+CASE cfg=O3_native_ffastmath tier=tier3hadd op=dot n=65536 reps=400 med_ns=19539.4 min_ns=17242.8 ns_elem=0.2981 ns_elem_min=0.2631 gbps=53.66 chk=-1103.52 trials_ns= 22540.0 17242.8 18033.9 19539.4 30576.2
+CASE cfg=O3_native_ffastmath tier=tier3_4acc op=dot n=65536 reps=400 med_ns=12983.6 min_ns=12400.8 ns_elem=0.1981 ns_elem_min=0.1892 gbps=80.76 chk=-1103.52 trials_ns= 13133.9 12485.0 12400.8 12983.6 13279.3
+CASE cfg=O3_native_ffastmath tier=tier3 op=dot_elem n=65536 reps=400 med_ns=18618.1 min_ns=18297.7 ns_elem=0.2841 ns_elem_min=0.2792 gbps=70.40 chk=-2207.04 trials_ns= 18618.1 18297.7 26373.0 20170.2 18470.4
+CASE cfg=O3_native_ffastmath tier=tier3 op=len n=65536 reps=400 med_ns=15189.4 min_ns=13975.1 ns_elem=0.2318 ns_elem_min=0.2132 gbps=86.29 chk=250962 trials_ns= 13975.1 15325.1 17587.4 15018.3 15189.4
+CASE cfg=O3_native_ffastmath tier=tier3 op=normalize n=65536 reps=400 med_ns=29439.5 min_ns=28302.4 ns_elem=0.4492 ns_elem_min=0.4319 gbps=35.62 chk=2061.72 trials_ns= 31233.9 29439.5 28302.4 30116.1 28584.9
+CASE cfg=O3_native_ffastmath tier=tier3_rsqrt op=normalize n=65536 reps=400 med_ns=22984.6 min_ns=21760.6 ns_elem=0.3507 ns_elem_min=0.3320 gbps=45.62 chk=2061.72 trials_ns= 24664.0 21760.6 21998.0 22984.6 24352.2
+CASE cfg=O3_native_ffastmath tier=tier3 op=collision n=65536 reps=400 med_ns=47052.7 min_ns=44634.8 ns_elem=0.7180 ns_elem_min=0.6811 gbps=44.57 chk=84.2649 trials_ns= 48694.6 44634.8 47052.7 45603.7 48932.3
+CASE cfg=O3_native_ffastmath tier=tier3_rsqrt op=collision n=65536 reps=400 med_ns=44362.9 min_ns=36772.7 ns_elem=0.6769 ns_elem_min=0.5611 gbps=47.27 chk=84.2642 trials_ns= 49156.6 39384.4 44362.9 51771.6 36772.7
+CASE cfg=O3_native_ffastmath tier=tier1 op=add n=1048576 reps=100 med_ns=5886364.6 min_ns=5606810.6 ns_elem=5.6137 ns_elem_min=5.3471 gbps=4.28 chk=11455.4 trials_ns= 5886364.6 5804307.9 5606810.6 6037517.1 6099523.7
+CASE cfg=O3_native_ffastmath tier=tier1 op=scale n=1048576 reps=100 med_ns=4696965.0 min_ns=4273447.9 ns_elem=4.4794 ns_elem_min=4.0755 gbps=3.57 chk=3739.47 trials_ns= 4696965.0 4616868.7 4273447.9 5436276.3 5562126.7
+CASE cfg=O3_native_ffastmath tier=tier1 op=dot n=1048576 reps=100 med_ns=5642747.0 min_ns=5062786.1 ns_elem=5.3813 ns_elem_min=4.8282 gbps=2.97 chk=-2163.1 trials_ns= 5729773.4 7249477.1 5062786.1 5357155.8 5642747.0
+CASE cfg=O3_native_ffastmath tier=tier1 op=dot_elem n=1048576 reps=100 med_ns=9190506.0 min_ns=7191173.9 ns_elem=8.7647 ns_elem_min=6.8580 gbps=2.28 chk=-4326.12 trials_ns= 9871673.4 9704101.8 9190506.0 7616966.8 7191173.9
+CASE cfg=O3_native_ffastmath tier=tier1 op=len n=1048576 reps=100 med_ns=5597323.7 min_ns=5367196.9 ns_elem=5.3380 ns_elem_min=5.1186 gbps=3.75 chk=4.01015e+06 trials_ns= 5714765.5 5659347.4 5420183.1 5367196.9 5597323.7
+CASE cfg=O3_native_ffastmath tier=tier1 op=normalize n=1048576 reps=100 med_ns=6210381.8 min_ns=5449748.0 ns_elem=5.9227 ns_elem_min=5.1973 gbps=2.70 chk=11339.3 trials_ns= 5593857.2 5449748.0 6766251.1 6210381.8 7469773.6
+CASE cfg=O3_native_ffastmath tier=tier1 op=collision n=1048576 reps=100 med_ns=10989200.0 min_ns=10784548.3 ns_elem=10.4801 ns_elem_min=10.2849 gbps=3.05 chk=-2800.39 trials_ns= 12134217.6 10784548.3 10845881.5 10989200.0 11511407.0
+CASE cfg=O3_native_ffastmath tier=tier2 op=add n=1048576 reps=100 med_ns=6713385.5 min_ns=6552561.2 ns_elem=6.4024 ns_elem_min=6.2490 gbps=3.75 chk=11455.4 trials_ns= 6552561.2 6813200.2 6713385.5 7331156.6 6654577.9
+CASE cfg=O3_native_ffastmath tier=tier2 op=scale n=1048576 reps=100 med_ns=5248214.2 min_ns=4605108.0 ns_elem=5.0051 ns_elem_min=4.3918 gbps=3.20 chk=3739.47 trials_ns= 4625793.3 5248214.2 5389641.7 4605108.0 5423321.4
+CASE cfg=O3_native_ffastmath tier=tier2 op=dot n=1048576 reps=100 med_ns=3132930.4 min_ns=2834004.7 ns_elem=2.9878 ns_elem_min=2.7027 gbps=5.36 chk=-2163.06 trials_ns= 3506138.7 2834004.7 3453013.7 3100062.1 3132930.4
+CASE cfg=O3_native_ffastmath tier=tier2 op=dot_elem n=1048576 reps=100 med_ns=6853464.8 min_ns=6669045.9 ns_elem=6.5360 ns_elem_min=6.3601 gbps=3.06 chk=-4326.12 trials_ns= 6853464.8 7107513.4 6669045.9 6834580.1 7397236.6
+CASE cfg=O3_native_ffastmath tier=tier2 op=len n=1048576 reps=100 med_ns=4938538.4 min_ns=4583542.1 ns_elem=4.7098 ns_elem_min=4.3712 gbps=4.25 chk=4.01015e+06 trials_ns= 4940028.6 4583542.1 4878320.0 5121751.8 4938538.4
+CASE cfg=O3_native_ffastmath tier=tier2 op=normalize n=1048576 reps=100 med_ns=5009651.9 min_ns=4699303.1 ns_elem=4.7776 ns_elem_min=4.4816 gbps=3.35 chk=11339.2 trials_ns= 4718713.2 5085525.7 5009651.9 5222700.8 4699303.1
+CASE cfg=O3_native_ffastmath tier=tier2 op=collision n=1048576 reps=100 med_ns=8402474.2 min_ns=8117171.5 ns_elem=8.0132 ns_elem_min=7.7411 gbps=3.99 chk=-2800.44 trials_ns= 8787478.6 8402474.2 8694399.8 8269835.0 8117171.5
+CASE cfg=O3_native_ffastmath tier=tier3 op=add n=1048576 reps=100 med_ns=6541949.6 min_ns=6299860.5 ns_elem=6.2389 ns_elem_min=6.0080 gbps=3.85 chk=11455.4 trials_ns= 6466632.2 6970227.7 6569993.5 6541949.6 6299860.5
+CASE cfg=O3_native_ffastmath tier=tier3 op=scale n=1048576 reps=100 med_ns=6621053.2 min_ns=4773652.5 ns_elem=6.3143 ns_elem_min=4.5525 gbps=2.53 chk=3739.47 trials_ns= 4773652.5 6244250.4 6705451.8 6621053.2 7024904.0
+CASE cfg=O3_native_ffastmath tier=tier3 op=dot n=1048576 reps=100 med_ns=3143065.8 min_ns=2989615.2 ns_elem=2.9975 ns_elem_min=2.8511 gbps=5.34 chk=-2163 trials_ns= 3847032.7 3003991.8 2989615.2 3284198.9 3143065.8
+CASE cfg=O3_native_ffastmath tier=tier3hadd op=dot n=1048576 reps=100 med_ns=3478070.2 min_ns=2909658.3 ns_elem=3.3169 ns_elem_min=2.7749 gbps=4.82 chk=-2163.08 trials_ns= 3478070.2 3575906.9 3540322.4 3282826.7 2909658.3
+CASE cfg=O3_native_ffastmath tier=tier3_4acc op=dot n=1048576 reps=100 med_ns=2840158.5 min_ns=2755196.4 ns_elem=2.7086 ns_elem_min=2.6276 gbps=5.91 chk=-2163.04 trials_ns= 2840158.5 3041923.5 2802281.9 2755196.4 2860504.6
+CASE cfg=O3_native_ffastmath tier=tier3 op=dot_elem n=1048576 reps=100 med_ns=6464950.7 min_ns=6273446.9 ns_elem=6.1655 ns_elem_min=5.9828 gbps=3.24 chk=-4326.12 trials_ns= 6637477.6 6464950.7 6916348.9 6273446.9 6402512.1
+CASE cfg=O3_native_ffastmath tier=tier3 op=len n=1048576 reps=100 med_ns=4909927.9 min_ns=4798517.9 ns_elem=4.6825 ns_elem_min=4.5762 gbps=4.27 chk=4.01015e+06 trials_ns= 4903611.1 4982959.7 4798517.9 4998376.2 4909927.9
+CASE cfg=O3_native_ffastmath tier=tier3 op=normalize n=1048576 reps=100 med_ns=4734773.2 min_ns=4614475.4 ns_elem=4.5154 ns_elem_min=4.4007 gbps=3.54 chk=11339.2 trials_ns= 4614475.4 5051211.9 4734773.2 4635712.6 4860393.5
+CASE cfg=O3_native_ffastmath tier=tier3_rsqrt op=normalize n=1048576 reps=100 med_ns=4883263.6 min_ns=4744672.2 ns_elem=4.6570 ns_elem_min=4.5249 gbps=3.44 chk=11339.2 trials_ns= 4883263.6 5061657.1 4837153.4 4744672.2 4905737.1
+CASE cfg=O3_native_ffastmath tier=tier3 op=collision n=1048576 reps=100 med_ns=8163315.9 min_ns=8004248.8 ns_elem=7.7851 ns_elem_min=7.6334 gbps=4.11 chk=-2800.43 trials_ns= 8342683.0 8004248.8 9171192.6 8163315.9 8125546.3
+CASE cfg=O3_native_ffastmath tier=tier3_rsqrt op=collision n=1048576 reps=100 med_ns=8400383.8 min_ns=8188986.6 ns_elem=8.0112 ns_elem_min=7.8096 gbps=3.99 chk=-2800.44 trials_ns= 8513318.8 8404279.1 8257735.3 8400383.8 8188986.6
+# loadavg_after=5.47 4.12 4.14 2/2637 157039
+# cpu_khz_after=4242430

@@ -1,0 +1,27 @@
+### 编译选项：-O3 -march=native
+   ../bench.cpp:236:28: note:  LOOP VECTORIZED
+   ../bench.cpp:244:28: note:  LOOP VECTORIZED
+   ../bench.cpp:253:28: note:  LOOP VECTORIZED
+   ../bench.cpp:261:28: note:  LOOP VECTORIZED
+   ../bench.cpp:270:28: missed:   not vectorized: control flow in loop.
+   ../bench.cpp:279:28: missed:   not vectorized: control flow in loop.
+   ../bench.cpp:289:28: missed:   not vectorized: control flow in loop.
+
+### 编译选项：-O3 -march=native -fno-math-errno
+   ../bench.cpp:236:28: note:  LOOP VECTORIZED
+   ../bench.cpp:244:28: note:  LOOP VECTORIZED
+   ../bench.cpp:253:28: note:  LOOP VECTORIZED
+   ../bench.cpp:261:28: note:  LOOP VECTORIZED
+   ../bench.cpp:270:28: note:  LOOP VECTORIZED
+   ../bench.cpp:279:28: missed:   not vectorized: control flow in loop.
+   ../bench.cpp:289:28: missed:   not vectorized: control flow in loop.
+
+### 编译选项：-O3 -march=native -ffast-math
+   ../bench.cpp:236:28: note:  LOOP VECTORIZED
+   ../bench.cpp:244:28: note:  LOOP VECTORIZED
+   ../bench.cpp:253:28: note:  LOOP VECTORIZED
+   ../bench.cpp:261:28: note:  LOOP VECTORIZED
+   ../bench.cpp:270:28: note:  LOOP VECTORIZED
+   ../bench.cpp:279:28: note:  LOOP VECTORIZED
+   ../bench.cpp:289:28: note:  LOOP VECTORIZED
+

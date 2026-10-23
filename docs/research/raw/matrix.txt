@@ -1,0 +1,27 @@
+
+-- N=1048576 --
+add       t1=5.3275   t2=5.4777   t2ff=5.4674   t2noerr=6.2021   t3=6.7682   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=3.55  | x0.97 x0.97 x0.86 x0.79 -
+scale     t1=4.1889   t2=4.3238   t2ff=4.0990   t2noerr=4.1111   t3=4.0064   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=3.99  | x0.97 x1.02 x1.02 x1.05 -
+dot       t1=3.5304   t2=2.5921   t2ff=2.5095   t2noerr=2.5752   t3=2.5957   t3hadd=2.4619   t3acc4=2.4110   t3rsqrt=-        t3_gbps=6.16  | x1.36 x1.41 x1.37 x1.36 -
+dot_elem  t1=5.3121   t2=5.3256   t2ff=5.3644   t2noerr=5.7004   t3=5.3940   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=3.71  | x1.00 x0.99 x0.93 x0.98 -
+len       t1=4.2208   t2=4.0837   t2ff=3.9290   t2noerr=4.0235   t3=4.0430   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=4.95  | x1.03 x1.07 x1.05 x1.04 -
+normalize t1=4.5879   t2=4.3124   t2ff=4.0814   t2noerr=4.2673   t3=4.0104   t3hadd=-        t3acc4=-        t3rsqrt=4.0088   t3_gbps=3.99  | x1.06 x1.12 x1.08 x1.14 -
+collision t1=9.5550   t2=7.1059   t2ff=6.9829   t2noerr=7.2374   t3=6.7836   t3hadd=-        t3acc4=-        t3rsqrt=6.7604   t3_gbps=4.72  | x1.34 x1.37 x1.32 x1.41 -
+
+-- N=65536 --
+add       t1=1.4260   t2=0.2923   t2ff=0.3266   t2noerr=0.3146   t3=0.2992   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=80.22 | x4.88 x4.37 x4.53 x4.77 -
+scale     t1=2.1721   t2=0.2206   t2ff=0.2197   t2noerr=0.2263   t3=0.2228   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=71.83 | x9.85 x9.89 x9.60 x9.75 -
+dot       t1=2.6521   t2=0.7721   t2ff=0.1768   t2noerr=0.8172   t3=0.3385   t3hadd=0.2707   t3acc4=0.1836   t3rsqrt=-        t3_gbps=47.27 | x3.43 x15.00 x3.25 x7.83 -
+dot_elem  t1=1.8067   t2=0.2728   t2ff=0.2943   t2noerr=0.2742   t3=0.2703   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=74.00 | x6.62 x6.14 x6.59 x6.68 -
+len       t1=1.8037   t2=1.5900   t2ff=0.3126   t2noerr=0.2657   t3=0.2294   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=87.17 | x1.13 x5.77 x6.79 x7.86 -
+normalize t1=2.7905   t2=2.5382   t2ff=0.3021   t2noerr=2.5544   t3=0.3751   t3hadd=-        t3acc4=-        t3rsqrt=0.3691   t3_gbps=42.65 | x1.10 x9.24 x1.09 x7.44 -
+collision t1=7.9121   t2=4.7021   t2ff=0.6592   t2noerr=4.5492   t3=0.6354   t3hadd=-        t3acc4=-        t3rsqrt=0.6898   t3_gbps=50.36 | x1.68 x12.00 x1.74 x12.45 -
+
+-- N=8192 --
+add       t1=1.5162   t2=0.2405   t2ff=0.2370   t2noerr=0.2392   t3=0.2319   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=103.48 | x6.30 x6.40 x6.34 x6.54 -
+scale     t1=2.2139   t2=0.1645   t2ff=0.1672   t2noerr=0.1674   t3=0.1674   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=95.57 | x13.46 x13.24 x13.23 x13.23 -
+dot       t1=2.6811   t2=0.7607   t2ff=0.1448   t2noerr=0.7646   t3=0.3213   t3hadd=0.2492   t3acc4=0.1428   t3rsqrt=-        t3_gbps=49.79 | x3.52 x18.52 x3.51 x8.34 -
+dot_elem  t1=1.8714   t2=0.1979   t2ff=0.2136   t2noerr=0.1994   t3=0.2083   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=96.03 | x9.46 x8.76 x9.39 x8.98 -
+len       t1=1.9551   t2=1.5597   t2ff=0.2750   t2noerr=0.2395   t3=0.2031   t3hadd=-        t3acc4=-        t3rsqrt=-        t3_gbps=98.46 | x1.25 x7.11 x8.16 x9.63 -
+normalize t1=2.8541   t2=2.4967   t2ff=0.2901   t2noerr=2.4844   t3=0.3395   t3hadd=-        t3acc4=-        t3rsqrt=0.3082   t3_gbps=47.13 | x1.14 x9.84 x1.15 x8.41 -
+collision t1=7.9584   t2=3.9682   t2ff=0.5882   t2noerr=3.8351   t3=0.5483   t3hadd=-        t3acc4=-        t3rsqrt=0.5552   t3_gbps=58.36 | x2.01 x13.53 x2.08 x14.51 -

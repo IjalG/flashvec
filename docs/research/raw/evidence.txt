@@ -1,0 +1,112 @@
+# flashvec 基准证据文件（由 bench 目录下命令生成，可复现）
+
+## A. GCC 向量化报告（-fopt-info-vec-optimized）
+### A1. -O3 -march=native：出现 'loop vectorized' 的源码行号 -> 次数
+      6 101
+     28 107
+      6 114
+      1 236
+      1 244
+      1 253
+      1 261
+### A2. -O3 -march=native -ffast-math：同上
+      6 101
+     28 107
+      6 114
+      1 236
+      1 244
+      1 253
+      1 261
+      1 270
+      1 279
+      1 289
+      1 632
+### A3. 行号 -> 函数（源码 bench/bench.cpp）
+182:FV_NOINLINE static void t1_add(unsigned n)
+187:FV_NOINLINE static void t1_scale(unsigned n, float s)
+192:FV_NOINLINE static void t1_dot(unsigned n)
+200:FV_NOINLINE static void t1_dot_elem(unsigned n)
+209:FV_NOINLINE static void t1_len(unsigned n)
+217:FV_NOINLINE static void t1_normalize(unsigned n)
+222:FV_NOINLINE static void t1_collision(unsigned n)
+234:FV_NOINLINE static void t2_add(unsigned n)
+242:FV_NOINLINE static void t2_scale(unsigned n, float s)
+250:FV_NOINLINE static void t2_dot(unsigned n)
+259:FV_NOINLINE static void t2_dot_elem(unsigned n)
+268:FV_NOINLINE static void t2_len(unsigned n)
+277:FV_NOINLINE static void t2_normalize(unsigned n)
+287:FV_NOINLINE static void t2_collision(unsigned n)
+332:FV_NOINLINE static void t3_add(unsigned n)
+342:FV_NOINLINE static void t3_scale(unsigned n, float s)
+353:FV_NOINLINE static void t3_dot(unsigned n)
+371:FV_NOINLINE static void t3_dot4(unsigned n)
+396:FV_NOINLINE static void t3_dot_hadd(unsigned n)
+413:FV_NOINLINE static void t3_dot_elem(unsigned n)
+431:FV_NOINLINE static void t3_len(unsigned n)
+452:FV_NOINLINE static void t3_normalize(unsigned n)
+476:FV_NOINLINE static void t3_normalize_rsqrt(unsigned n)
+501:FV_NOINLINE static void t3_collision(unsigned n)
+535:FV_NOINLINE static void t3_collision_rsqrt(unsigned n)
+
+## B. 反汇编（objdump -d --no-show-raw-insn，静态符号 C++ mangled）
+### B1. 档1 t1_add 主循环：每元素 vmovq/vmovq/call/vmovq，参数走 xmm 寄存器
+    23d4:	vmovq  (%r14,%rbp,8),%xmm1
+    23da:	vmovq  0x0(%r13,%rbp,8),%xmm0
+    23e1:	call   79e0 <fv_vec2_add>
+    23e6:	vmovq  %xmm0,(%r15,%rbp,8)
+    23ec:	cmp    %ebx,%r12d
+    23ef:	jne    23d0 <_ZL6t1_addj+0x30>
+### B2. 档1 t1_dot 主循环：累加器经 ebp 通用寄存器来回搬 + 每元素一次 call
+    2494:	vmovq  0x0(%r13,%rax,8),%xmm0
+    249b:	vmovq  (%r14,%rax,8),%xmm1
+    24a1:	call   7a50 <fv_vec2_dot>
+    24a6:	vmovd  %ebp,%xmm3
+    24aa:	vaddss %xmm0,%xmm3,%xmm2
+    24ae:	vmovd  %xmm2,%ebp
+    24b2:	cmp    %ebx,%r12d
+    24b5:	jne    2490 <_ZL6t1_dotj+0x20>
+### B3. 档2 t2_dot（无 fast-math）：SIMD 乘加后每 8 元素做 8 路水平归约（串行链）
+    21f0:	vmovaps (%rsi,%rax,1),%ymm4
+    21f5:	vmovaps (%r8,%rax,1),%ymm5
+    21fb:	vmulps (%rcx,%rax,1),%ymm4,%ymm1
+    2200:	vfmadd231ps (%rdi,%rax,1),%ymm5,%ymm1
+    2206:	add    $0x20,%rax
+    220a:	vshufps $0x55,%xmm1,%xmm1,%xmm3
+    220f:	vshufps $0xff,%xmm1,%xmm1,%xmm2
+    2214:	vaddss %xmm1,%xmm0,%xmm0
+    2218:	vaddss %xmm0,%xmm3,%xmm3
+    221c:	vunpckhps %xmm1,%xmm1,%xmm0
+    2220:	vextractf128 $0x1,%ymm1,%xmm1
+    2226:	vaddss %xmm3,%xmm0,%xmm0
+    222a:	vaddss %xmm2,%xmm0,%xmm0
+### B4. 档2 t2_len（无 fast-math）：出现 call sqrtf@plt
+23:    27fc:	vsqrtss %xmm0,%xmm0,%xmm0
+52:    2859:	call   11f0 <sqrtf@plt>
+### B5. 档3 t3_dot 单累加器：2 条依赖同一累加器的 vfmadd231ps
+    25e0:	vfmadd231ps (%r8,%rax,4),%ymm2,%ymm0
+    25e6:	vfmadd231ps (%rcx,%rax,4),%ymm3,%ymm0
+### B6. 档3 t3_dot4 四累加器：4 条独立 vfmadd231ps
+    266d:	vfmadd231ps (%r8,%rax,4),%ymm4,%ymm1
+    2673:	vfmadd231ps (%rcx,%rax,4),%ymm5,%ymm2
+    2679:	vfmadd231ps 0x20(%r8,%rax,4),%ymm6,%ymm0
+    2680:	vfmadd231ps 0x20(%rcx,%rax,4),%ymm7,%ymm3
+
+## C. -march=native / -ffast-math 的实际展开（g++ -Q --help=...）
+  -march=                     		znver2
+  -mavx2                      		[enabled]
+  -mavx256-split-unaligned-load 	[disabled]
+  -mavx256-split-unaligned-store 	[disabled]
+  -mavx512f                   		[disabled]
+  -mavx512fp16                		[disabled]
+  -mfma                       		[enabled]
+  -mfma4                      		[disabled]
+  -mtune=                     		znver2
+  -fassociative-math          		[enabled]
+  -ffinite-math-only          		[enabled]
+  -ffp-contract=[off|on|fast] 		fast
+  -fmath-errno                		[disabled]
+  -freciprocal-math           		[enabled]
+  -frounding-math             		[disabled]
+  -fsigned-zeros              		[disabled]
+  -ftrapping-math             		[disabled]
+  -funsafe-math-optimizations 		[enabled]

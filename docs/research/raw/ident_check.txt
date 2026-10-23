@@ -1,0 +1,39 @@
+DIFF cfg=checks tier=tier1 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=checks tier=tier2 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=checks tier=tier2 op=add n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier3 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=checks tier=tier3 op=add n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier1 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=checks tier=tier2 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=checks tier=tier2 op=scale n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier3 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=checks tier=tier3 op=scale n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier1 op=dot n=8192 scalar=-30.3377914 ref=-30.3377762 rel=5.030e-07
+DIFF cfg=checks tier=tier2 op=dot n=8192 scalar=-30.3377914 ref=-30.3377762 rel=5.030e-07
+DIFF cfg=checks tier=tier3 op=dot n=8192 scalar=-30.3378315 ref=-30.3377762 rel=1.823e-06
+DIFF cfg=checks tier=tier3hadd op=dot n=8192 scalar=-30.3378277 ref=-30.3377762 rel=1.698e-06
+DIFF cfg=checks tier=tier3_4acc op=dot n=8192 scalar=-30.3378124 ref=-30.3377762 rel=1.195e-06
+DIFF cfg=checks tier=tier1 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+DIFF cfg=checks tier=tier2 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+IDENT cfg=checks tier=tier2 op=dot_elem n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier3 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+IDENT cfg=checks tier=tier3 op=dot_elem n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier1 op=len n=8192 max_abs=1.192e-07 max_rel=1.192e-07 n_diff=690 n_nan=0
+DIFF cfg=checks tier=tier2 op=len n=8192 max_abs=1.192e-07 max_rel=1.192e-07 n_diff=690 n_nan=0
+IDENT cfg=checks tier=tier2 op=len n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier3 op=len n=8192 max_abs=1.192e-07 max_rel=1.192e-07 n_diff=690 n_nan=0
+IDENT cfg=checks tier=tier3 op=len n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier1 op=normalize n=8192 max_abs=1.788e-07 max_rel=1.913e-07 n_diff=572 n_nan=0
+DIFF cfg=checks tier=tier2 op=normalize n=8192 max_abs=1.788e-07 max_rel=1.913e-07 n_diff=572 n_nan=0
+IDENT cfg=checks tier=tier2 op=normalize n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier3 op=normalize n=8192 max_abs=1.788e-07 max_rel=1.913e-07 n_diff=572 n_nan=0
+IDENT cfg=checks tier=tier3 op=normalize n=8192 bits_equal=1 n_diff=0
+DIFF cfg=checks tier=tier3_rsqrt op=normalize n=8192 max_abs=2.384e-07 max_rel=2.624e-07 n_diff=3342 n_nan=0
+IDENT cfg=checks tier=tier3_rsqrt op=normalize n=8192 bits_equal=0 n_diff=3146
+DIFF cfg=checks tier=tier1 op=collision n=8192 max_abs=1.431e-06 max_rel=8.403e-07 n_diff=2105 n_nan=0
+DIFF cfg=checks tier=tier2 op=collision n=8192 max_abs=1.431e-06 max_rel=8.131e-07 n_diff=5810 n_nan=0
+IDENT cfg=checks tier=tier2 op=collision n=8192 bits_equal=0 n_diff=4948
+DIFF cfg=checks tier=tier3 op=collision n=8192 max_abs=1.431e-06 max_rel=8.131e-07 n_diff=5810 n_nan=0
+IDENT cfg=checks tier=tier3 op=collision n=8192 bits_equal=0 n_diff=4948
+DIFF cfg=checks tier=tier3_rsqrt op=collision n=8192 max_abs=1.669e-06 max_rel=9.563e-07 n_diff=6615 n_nan=0
+IDENT cfg=checks tier=tier3_rsqrt op=collision n=8192 bits_equal=0 n_diff=6118

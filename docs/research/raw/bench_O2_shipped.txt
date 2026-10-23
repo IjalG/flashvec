@@ -1,0 +1,72 @@
+# pinned cpu=2 running_on=2
+# flashvec bench: cfg=O2_shipped
+# build: 12.4.0 Oct 17 2026
+# n_full=1048576 n_mid=65536 n_small=8192 reps=100 reps_mid=400 reps_small=4000 trials=5 checks=8192
+# avx2=no
+# compiled_features: avx2=0 fma=0 fast_math=0
+# tsc_hz=1796555017 (1.797 GHz) cpu_khz_before=3903440
+DIFF cfg=O2_shipped tier=tier1 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O2_shipped tier=tier2 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O2_shipped tier=tier2 op=add n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O2_shipped tier=tier1 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O2_shipped tier=tier2 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O2_shipped tier=tier2 op=scale n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O2_shipped tier=tier1 op=dot n=8192 scalar=-30.3377762 ref=-30.3377762 rel=0.000e+00
+DIFF cfg=O2_shipped tier=tier2 op=dot n=8192 scalar=-30.3377762 ref=-30.3377762 rel=0.000e+00
+DIFF cfg=O2_shipped tier=tier1 op=dot_elem n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O2_shipped tier=tier2 op=dot_elem n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O2_shipped tier=tier2 op=dot_elem n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O2_shipped tier=tier1 op=len n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O2_shipped tier=tier2 op=len n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O2_shipped tier=tier2 op=len n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O2_shipped tier=tier1 op=normalize n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O2_shipped tier=tier2 op=normalize n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O2_shipped tier=tier2 op=normalize n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O2_shipped tier=tier1 op=collision n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O2_shipped tier=tier2 op=collision n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O2_shipped tier=tier2 op=collision n=8192 bits_equal=1 n_diff=0
+# loadavg_before=5.47 4.12 4.14 3/2644 157049
+CASE cfg=O2_shipped tier=tier1 op=add n=8192 reps=4000 med_ns=12120.9 min_ns=11570.9 ns_elem=1.4796 ns_elem_min=1.4125 gbps=16.22 chk=145.033 trials_ns= 11570.9 12005.0 12120.9 13757.5 12217.9
+CASE cfg=O2_shipped tier=tier1 op=scale n=8192 reps=4000 med_ns=18506.7 min_ns=18077.5 ns_elem=2.2591 ns_elem_min=2.2067 gbps=7.08 chk=238.254 trials_ns= 19367.9 19722.0 18077.5 18190.8 18506.7
+CASE cfg=O2_shipped tier=tier1 op=dot n=8192 reps=4000 med_ns=24929.8 min_ns=24455.4 ns_elem=3.0432 ns_elem_min=2.9853 gbps=5.26 chk=-151.689 trials_ns= 24929.8 24455.4 24531.1 25307.6 25452.3
+CASE cfg=O2_shipped tier=tier1 op=dot_elem n=8192 reps=4000 med_ns=16058.7 min_ns=15824.1 ns_elem=1.9603 ns_elem_min=1.9317 gbps=10.20 chk=-303.378 trials_ns= 16058.7 16606.5 15824.1 15879.5 17043.5
+CASE cfg=O2_shipped tier=tier1 op=len n=8192 reps=4000 med_ns=15048.0 min_ns=14909.1 ns_elem=1.8369 ns_elem_min=1.8200 gbps=10.89 chk=31466 trials_ns= 16015.2 15048.0 15257.4 14948.8 14909.1
+CASE cfg=O2_shipped tier=tier1 op=normalize n=8192 reps=4000 med_ns=26595.2 min_ns=26241.0 ns_elem=3.2465 ns_elem_min=3.2032 gbps=4.93 chk=714.894 trials_ns= 26881.4 27106.2 26595.2 26548.8 26241.0
+CASE cfg=O2_shipped tier=tier1 op=collision n=8192 reps=4000 med_ns=64222.2 min_ns=63703.2 ns_elem=7.8396 ns_elem_min=7.7763 gbps=4.08 chk=-1006.57 trials_ns= 64207.3 64222.2 63703.2 64807.1 66310.9
+CASE cfg=O2_shipped tier=tier2 op=add n=8192 reps=4000 med_ns=2813.7 min_ns=2425.1 ns_elem=0.3435 ns_elem_min=0.2960 gbps=69.88 chk=145.033 trials_ns= 2425.1 2966.4 2830.3 2813.7 2735.3
+CASE cfg=O2_shipped tier=tier2 op=scale n=8192 reps=4000 med_ns=2417.7 min_ns=1956.0 ns_elem=0.2951 ns_elem_min=0.2388 gbps=54.21 chk=238.254 trials_ns= 2417.7 2577.2 2769.1 2054.1 1956.0
+CASE cfg=O2_shipped tier=tier2 op=dot n=8192 reps=4000 med_ns=7743.3 min_ns=6900.5 ns_elem=0.9452 ns_elem_min=0.8424 gbps=16.93 chk=-151.689 trials_ns= 7743.3 6900.5 8201.7 7816.8 7543.8
+CASE cfg=O2_shipped tier=tier2 op=dot_elem n=8192 reps=4000 med_ns=2007.9 min_ns=1820.4 ns_elem=0.2451 ns_elem_min=0.2222 gbps=81.60 chk=-303.378 trials_ns= 2049.2 2007.9 1873.2 1820.4 2479.1
+CASE cfg=O2_shipped tier=tier2 op=len n=8192 reps=4000 med_ns=14310.6 min_ns=14029.1 ns_elem=1.7469 ns_elem_min=1.7125 gbps=11.45 chk=31466 trials_ns= 14468.8 14376.2 14029.1 14300.4 14310.6
+CASE cfg=O2_shipped tier=tier2 op=normalize n=8192 reps=4000 med_ns=22353.4 min_ns=21721.1 ns_elem=2.7287 ns_elem_min=2.6515 gbps=5.86 chk=714.896 trials_ns= 23173.5 23914.2 21721.1 22353.4 22243.0
+CASE cfg=O2_shipped tier=tier2 op=collision n=8192 reps=4000 med_ns=41007.7 min_ns=40425.8 ns_elem=5.0058 ns_elem_min=4.9348 gbps=6.39 chk=-1006.58 trials_ns= 40677.4 41595.8 41007.7 43224.6 40425.8
+CASE cfg=O2_shipped tier=tier1 op=add n=65536 reps=400 med_ns=108452.4 min_ns=93274.7 ns_elem=1.6549 ns_elem_min=1.4233 gbps=14.50 chk=1537.44 trials_ns= 108452.4 99613.9 130855.9 93274.7 113568.7
+CASE cfg=O2_shipped tier=tier1 op=scale n=65536 reps=400 med_ns=152945.5 min_ns=151927.7 ns_elem=2.3338 ns_elem_min=2.3182 gbps=6.86 chk=931.829 trials_ns= 152945.5 155041.1 154792.6 152213.1 151927.7
+CASE cfg=O2_shipped tier=tier1 op=dot n=65536 reps=400 med_ns=212744.2 min_ns=193490.5 ns_elem=3.2462 ns_elem_min=2.9524 gbps=4.93 chk=-1103.52 trials_ns= 212744.2 193490.5 197695.0 221794.4 234012.0
+CASE cfg=O2_shipped tier=tier1 op=dot_elem n=65536 reps=400 med_ns=137263.2 min_ns=131438.8 ns_elem=2.0945 ns_elem_min=2.0056 gbps=9.55 chk=-2207.04 trials_ns= 131438.8 168311.1 162310.6 132775.1 137263.2
+CASE cfg=O2_shipped tier=tier1 op=len n=65536 reps=400 med_ns=134260.2 min_ns=125903.2 ns_elem=2.0486 ns_elem_min=1.9211 gbps=9.76 chk=250963 trials_ns= 134260.2 134910.5 141537.0 125903.2 129491.7
+CASE cfg=O2_shipped tier=tier1 op=normalize n=65536 reps=400 med_ns=248086.6 min_ns=230501.1 ns_elem=3.7855 ns_elem_min=3.5172 gbps=4.23 chk=2061.71 trials_ns= 248086.6 253441.3 230501.1 235263.0 264193.0
+CASE cfg=O2_shipped tier=tier1 op=collision n=65536 reps=400 med_ns=647950.0 min_ns=606266.9 ns_elem=9.8869 ns_elem_min=9.2509 gbps=3.24 chk=84.2633 trials_ns= 647950.0 691350.8 669996.9 625114.4 606266.9
+CASE cfg=O2_shipped tier=tier2 op=add n=65536 reps=400 med_ns=25951.8 min_ns=24551.5 ns_elem=0.3960 ns_elem_min=0.3746 gbps=60.61 chk=1537.44 trials_ns= 25951.8 38637.6 24551.5 25068.2 31070.7
+CASE cfg=O2_shipped tier=tier2 op=scale n=65536 reps=400 med_ns=21798.3 min_ns=16799.3 ns_elem=0.3326 ns_elem_min=0.2563 gbps=48.10 chk=931.83 trials_ns= 21798.3 17085.5 16799.3 27530.4 23192.0
+CASE cfg=O2_shipped tier=tier2 op=dot n=65536 reps=400 med_ns=56376.8 min_ns=51123.3 ns_elem=0.8602 ns_elem_min=0.7801 gbps=18.60 chk=-1103.52 trials_ns= 56376.8 57339.9 59283.9 51123.3 53159.7
+CASE cfg=O2_shipped tier=tier2 op=dot_elem n=65536 reps=400 med_ns=19165.0 min_ns=17266.2 ns_elem=0.2924 ns_elem_min=0.2635 gbps=68.39 chk=-2207.04 trials_ns= 17266.2 18484.3 63421.4 19452.5 19165.0
+CASE cfg=O2_shipped tier=tier2 op=len n=65536 reps=400 med_ns=115003.5 min_ns=108249.2 ns_elem=1.7548 ns_elem_min=1.6518 gbps=11.40 chk=250963 trials_ns= 115003.5 108249.2 120085.9 117474.1 109290.5
+CASE cfg=O2_shipped tier=tier2 op=normalize n=65536 reps=400 med_ns=182977.4 min_ns=180657.0 ns_elem=2.7920 ns_elem_min=2.7566 gbps=5.73 chk=2061.73 trials_ns= 192269.5 182977.4 181264.1 180657.0 186419.1
+CASE cfg=O2_shipped tier=tier2 op=collision n=65536 reps=400 med_ns=408361.8 min_ns=384149.1 ns_elem=6.2311 ns_elem_min=5.8617 gbps=5.14 chk=84.2607 trials_ns= 408361.8 395925.8 490939.7 414319.7 384149.1
+CASE cfg=O2_shipped tier=tier1 op=add n=1048576 reps=100 med_ns=6265207.1 min_ns=5575101.6 ns_elem=5.9750 ns_elem_min=5.3168 gbps=4.02 chk=11455.3 trials_ns= 6311500.5 6918381.4 6049585.9 6265207.1 5575101.6
+CASE cfg=O2_shipped tier=tier1 op=scale n=1048576 reps=100 med_ns=4664526.4 min_ns=4313162.2 ns_elem=4.4484 ns_elem_min=4.1134 gbps=3.60 chk=3739.44 trials_ns= 4781121.5 4449260.8 4664526.4 4313162.2 4726811.9
+CASE cfg=O2_shipped tier=tier1 op=dot n=1048576 reps=100 med_ns=3952132.2 min_ns=3785355.1 ns_elem=3.7690 ns_elem_min=3.6100 gbps=4.25 chk=-2163.1 trials_ns= 3992629.2 3952132.2 3968261.3 3901681.5 3785355.1
+CASE cfg=O2_shipped tier=tier1 op=dot_elem n=1048576 reps=100 med_ns=5617642.1 min_ns=5444403.6 ns_elem=5.3574 ns_elem_min=5.1922 gbps=3.73 chk=-4326.2 trials_ns= 5569112.5 5847736.7 5444403.6 5617642.1 5703478.5
+CASE cfg=O2_shipped tier=tier1 op=len n=1048576 reps=100 med_ns=4911974.3 min_ns=4082665.5 ns_elem=4.6844 ns_elem_min=3.8935 gbps=4.27 chk=4.01018e+06 trials_ns= 4082665.5 4911974.3 4166682.2 5469333.5 6509363.0
+CASE cfg=O2_shipped tier=tier1 op=normalize n=1048576 reps=100 med_ns=6299859.9 min_ns=5248271.4 ns_elem=6.0080 ns_elem_min=5.0051 gbps=2.66 chk=11339.5 trials_ns= 6596636.7 6515306.5 6299859.9 5248271.4 5287818.2
+CASE cfg=O2_shipped tier=tier1 op=collision n=1048576 reps=100 med_ns=9469229.3 min_ns=9079531.3 ns_elem=9.0306 ns_elem_min=8.6589 gbps=3.54 chk=-2800.42 trials_ns= 10857233.8 9699224.1 9079531.3 9469229.3 9442979.2
+CASE cfg=O2_shipped tier=tier2 op=add n=1048576 reps=100 med_ns=5231555.3 min_ns=5158526.4 ns_elem=4.9892 ns_elem_min=4.9196 gbps=4.81 chk=11455.4 trials_ns= 6176961.1 5158526.4 5219584.2 5231555.3 5258637.9
+CASE cfg=O2_shipped tier=tier2 op=scale n=1048576 reps=100 med_ns=3958432.4 min_ns=3914693.8 ns_elem=3.7751 ns_elem_min=3.7333 gbps=4.24 chk=3739.48 trials_ns= 4087187.6 4086252.9 3928740.3 3958432.4 3914693.8
+CASE cfg=O2_shipped tier=tier2 op=dot n=1048576 reps=100 med_ns=2471575.3 min_ns=2383629.3 ns_elem=2.3571 ns_elem_min=2.2732 gbps=6.79 chk=-2163.1 trials_ns= 2423497.1 2471575.3 2383629.3 2523707.3 2498655.2
+CASE cfg=O2_shipped tier=tier2 op=dot_elem n=1048576 reps=100 med_ns=7201548.9 min_ns=5877410.9 ns_elem=6.8679 ns_elem_min=5.6051 gbps=2.91 chk=-4326.2 trials_ns= 5877410.9 5905900.5 9583735.7 7201548.9 11226972.4
+CASE cfg=O2_shipped tier=tier2 op=len n=1048576 reps=100 med_ns=7524831.4 min_ns=5659515.6 ns_elem=7.1762 ns_elem_min=5.3973 gbps=2.79 chk=4.01018e+06 trials_ns= 5659515.6 7544675.6 7524831.4 7800125.1 6813173.5
+CASE cfg=O2_shipped tier=tier2 op=normalize n=1048576 reps=100 med_ns=5898058.7 min_ns=5181467.5 ns_elem=5.6248 ns_elem_min=4.9414 gbps=2.84 chk=11339.6 trials_ns= 6931848.6 5891943.6 6315189.1 5898058.7 5181467.5
+CASE cfg=O2_shipped tier=tier2 op=collision n=1048576 reps=100 med_ns=8686865.9 min_ns=8487384.2 ns_elem=8.2844 ns_elem_min=8.0942 gbps=3.86 chk=-2800.52 trials_ns= 8982465.0 8940584.3 8487384.2 8686865.9 8593918.0
+# loadavg_after=5.19 4.28 4.20 2/2682 157423
+# cpu_khz_after=4184465

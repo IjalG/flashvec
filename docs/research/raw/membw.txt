@@ -1,0 +1,5 @@
+# membw: 每项 5 次取最小值，CPU 绑定由外部 taskset 决定
+size         working_MB    triad_GBs  triad16_GBs    write_GBs     read_GBs   memcpy_GBs
+N=1048576          12.0         6.91         9.21        12.33        12.22        17.19
+N=4194304          48.0         6.32         8.43         4.24         8.77         9.71
+N=8388608          96.0         6.07         8.09         3.78         7.63         8.91

@@ -1,0 +1,124 @@
+# pinned cpu=2 running_on=2
+# flashvec bench: cfg=O3_native
+# build: 12.4.0 Oct 17 2026
+# n_full=1048576 n_mid=65536 n_small=8192 reps=100 reps_mid=400 reps_small=4000 trials=5 checks=8192
+# avx2=yes fma=1
+# compiled_features: avx2=1 fma=1 fast_math=0
+# tsc_hz=1796542345 (1.797 GHz) cpu_khz_before=1114905
+DIFF cfg=O3_native tier=tier1 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O3_native tier=tier2 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O3_native tier=tier2 op=add n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier3 op=add n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O3_native tier=tier3 op=add n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier1 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+DIFF cfg=O3_native tier=tier2 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O3_native tier=tier2 op=scale n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier3 op=scale n=8192 max_abs=0.000e+00 max_rel=0.000e+00 n_diff=0 n_nan=0
+IDENT cfg=O3_native tier=tier3 op=scale n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier1 op=dot n=8192 scalar=-30.3377914 ref=-30.3377762 rel=5.030e-07
+DIFF cfg=O3_native tier=tier2 op=dot n=8192 scalar=-30.3377914 ref=-30.3377762 rel=5.030e-07
+DIFF cfg=O3_native tier=tier3 op=dot n=8192 scalar=-30.3378315 ref=-30.3377762 rel=1.823e-06
+DIFF cfg=O3_native tier=tier3hadd op=dot n=8192 scalar=-30.3378277 ref=-30.3377762 rel=1.698e-06
+DIFF cfg=O3_native tier=tier3_4acc op=dot n=8192 scalar=-30.3378124 ref=-30.3377762 rel=1.195e-06
+DIFF cfg=O3_native tier=tier1 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+DIFF cfg=O3_native tier=tier2 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+IDENT cfg=O3_native tier=tier2 op=dot_elem n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier3 op=dot_elem n=8192 max_abs=1.192e-07 max_rel=4.953e-05 n_diff=2175 n_nan=0
+IDENT cfg=O3_native tier=tier3 op=dot_elem n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier1 op=len n=8192 max_abs=1.192e-07 max_rel=1.192e-07 n_diff=690 n_nan=0
+DIFF cfg=O3_native tier=tier2 op=len n=8192 max_abs=1.192e-07 max_rel=1.192e-07 n_diff=690 n_nan=0
+IDENT cfg=O3_native tier=tier2 op=len n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier3 op=len n=8192 max_abs=1.192e-07 max_rel=1.192e-07 n_diff=690 n_nan=0
+IDENT cfg=O3_native tier=tier3 op=len n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier1 op=normalize n=8192 max_abs=1.788e-07 max_rel=1.913e-07 n_diff=572 n_nan=0
+DIFF cfg=O3_native tier=tier2 op=normalize n=8192 max_abs=1.788e-07 max_rel=1.913e-07 n_diff=572 n_nan=0
+IDENT cfg=O3_native tier=tier2 op=normalize n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier3 op=normalize n=8192 max_abs=1.788e-07 max_rel=1.913e-07 n_diff=572 n_nan=0
+IDENT cfg=O3_native tier=tier3 op=normalize n=8192 bits_equal=1 n_diff=0
+DIFF cfg=O3_native tier=tier3_rsqrt op=normalize n=8192 max_abs=2.384e-07 max_rel=2.624e-07 n_diff=3342 n_nan=0
+IDENT cfg=O3_native tier=tier3_rsqrt op=normalize n=8192 bits_equal=0 n_diff=3146
+DIFF cfg=O3_native tier=tier1 op=collision n=8192 max_abs=1.431e-06 max_rel=8.403e-07 n_diff=2105 n_nan=0
+DIFF cfg=O3_native tier=tier2 op=collision n=8192 max_abs=1.431e-06 max_rel=8.131e-07 n_diff=5810 n_nan=0
+IDENT cfg=O3_native tier=tier2 op=collision n=8192 bits_equal=0 n_diff=4948
+DIFF cfg=O3_native tier=tier3 op=collision n=8192 max_abs=1.431e-06 max_rel=8.131e-07 n_diff=5810 n_nan=0
+IDENT cfg=O3_native tier=tier3 op=collision n=8192 bits_equal=0 n_diff=4948
+DIFF cfg=O3_native tier=tier3_rsqrt op=collision n=8192 max_abs=1.669e-06 max_rel=9.563e-07 n_diff=6615 n_nan=0
+IDENT cfg=O3_native tier=tier3_rsqrt op=collision n=8192 bits_equal=0 n_diff=6118
+# loadavg_before=4.27 3.98 4.15 5/2597 156231
+CASE cfg=O3_native tier=tier1 op=add n=8192 reps=4000 med_ns=11182.3 min_ns=11049.4 ns_elem=1.3650 ns_elem_min=1.3488 gbps=17.58 chk=145.033 trials_ns= 11049.4 11298.6 11182.3 11283.3 11166.9
+CASE cfg=O3_native tier=tier1 op=scale n=8192 reps=4000 med_ns=17320.2 min_ns=16839.4 ns_elem=2.1143 ns_elem_min=2.0556 gbps=7.57 chk=238.254 trials_ns= 17320.2 17430.4 17395.0 17072.1 16839.4
+CASE cfg=O3_native tier=tier1 op=dot n=8192 reps=4000 med_ns=20828.6 min_ns=20779.6 ns_elem=2.5426 ns_elem_min=2.5366 gbps=6.29 chk=-151.689 trials_ns= 21116.4 21444.0 20806.3 20828.6 20779.6
+CASE cfg=O3_native tier=tier1 op=dot_elem n=8192 reps=4000 med_ns=13889.5 min_ns=13643.5 ns_elem=1.6955 ns_elem_min=1.6655 gbps=11.80 chk=-303.378 trials_ns= 13643.5 14038.5 13925.3 13889.5 13829.7
+CASE cfg=O3_native tier=tier1 op=len n=8192 reps=4000 med_ns=14012.9 min_ns=13951.8 ns_elem=1.7106 ns_elem_min=1.7031 gbps=11.69 chk=31466 trials_ns= 14174.5 13951.8 14012.9 14147.9 13971.6
+CASE cfg=O3_native tier=tier1 op=normalize n=8192 reps=4000 med_ns=22271.5 min_ns=21783.5 ns_elem=2.7187 ns_elem_min=2.6591 gbps=5.89 chk=714.894 trials_ns= 21783.5 22066.2 22599.2 22271.5 22556.3
+CASE cfg=O3_native tier=tier1 op=collision n=8192 reps=4000 med_ns=59223.6 min_ns=56952.1 ns_elem=7.2294 ns_elem_min=6.9522 gbps=4.43 chk=-1006.58 trials_ns= 62954.7 59223.6 56952.1 63850.2 59209.7
+CASE cfg=O3_native tier=tier2 op=add n=8192 reps=4000 med_ns=1980.8 min_ns=1911.3 ns_elem=0.2418 ns_elem_min=0.2333 gbps=99.26 chk=145.033 trials_ns= 2003.8 1944.3 1980.8 2100.4 1911.3
+CASE cfg=O3_native tier=tier2 op=scale n=8192 reps=4000 med_ns=1303.3 min_ns=1279.0 ns_elem=0.1591 ns_elem_min=0.1561 gbps=100.57 chk=238.254 trials_ns= 1289.2 1279.0 1433.2 1314.8 1303.3
+CASE cfg=O3_native tier=tier2 op=dot n=8192 reps=4000 med_ns=6287.0 min_ns=6092.6 ns_elem=0.7675 ns_elem_min=0.7437 gbps=20.85 chk=-151.689 trials_ns= 6242.2 6092.6 6287.0 6476.8 6885.3
+CASE cfg=O3_native tier=tier2 op=dot_elem n=8192 reps=4000 med_ns=1741.2 min_ns=1678.1 ns_elem=0.2125 ns_elem_min=0.2048 gbps=94.10 chk=-303.378 trials_ns= 2148.2 2039.4 1689.5 1678.1 1741.2
+CASE cfg=O3_native tier=tier2 op=len n=8192 reps=4000 med_ns=12528.5 min_ns=12438.0 ns_elem=1.5294 ns_elem_min=1.5183 gbps=13.08 chk=31466 trials_ns= 14252.4 13104.1 12445.0 12438.0 12528.5
+CASE cfg=O3_native tier=tier2 op=normalize n=8192 reps=4000 med_ns=20278.4 min_ns=20194.3 ns_elem=2.4754 ns_elem_min=2.4651 gbps=6.46 chk=714.896 trials_ns= 20302.5 20194.3 20278.4 20200.2 20361.8
+CASE cfg=O3_native tier=tier2 op=collision n=8192 reps=4000 med_ns=31757.7 min_ns=31544.4 ns_elem=3.8767 ns_elem_min=3.8506 gbps=8.25 chk=-1006.58 trials_ns= 38041.3 31689.5 31544.4 31757.7 32873.9
+CASE cfg=O3_native tier=tier3 op=add n=8192 reps=4000 med_ns=1917.6 min_ns=1894.2 ns_elem=0.2341 ns_elem_min=0.2312 gbps=102.53 chk=145.033 trials_ns= 2061.2 1897.5 1917.6 1952.0 1894.2
+CASE cfg=O3_native tier=tier3 op=scale n=8192 reps=4000 med_ns=1346.4 min_ns=1248.4 ns_elem=0.1644 ns_elem_min=0.1524 gbps=97.35 chk=238.254 trials_ns= 1629.9 1346.4 1248.4 1353.2 1321.5
+CASE cfg=O3_native tier=tier3 op=dot n=8192 reps=4000 med_ns=2659.1 min_ns=2611.1 ns_elem=0.3246 ns_elem_min=0.3187 gbps=49.29 chk=-151.689 trials_ns= 2659.1 2710.8 2633.0 2611.1 2835.8
+CASE cfg=O3_native tier=tier3hadd op=dot n=8192 reps=4000 med_ns=2026.7 min_ns=1887.9 ns_elem=0.2474 ns_elem_min=0.2305 gbps=64.67 chk=-151.689 trials_ns= 2023.1 1887.9 2026.7 2203.3 2146.2
+CASE cfg=O3_native tier=tier3_4acc op=dot n=8192 reps=4000 med_ns=1139.4 min_ns=1107.1 ns_elem=0.1391 ns_elem_min=0.1351 gbps=115.04 chk=-151.689 trials_ns= 1187.3 1139.4 1130.8 1162.2 1107.1
+CASE cfg=O3_native tier=tier3 op=dot_elem n=8192 reps=4000 med_ns=1690.0 min_ns=1659.3 ns_elem=0.2063 ns_elem_min=0.2025 gbps=96.95 chk=-303.378 trials_ns= 1659.3 1683.7 1690.0 1698.2 1731.8
+CASE cfg=O3_native tier=tier3 op=len n=8192 reps=4000 med_ns=1661.2 min_ns=1580.3 ns_elem=0.2028 ns_elem_min=0.1929 gbps=98.63 chk=31466 trials_ns= 1580.3 1635.0 1661.2 1669.2 1676.0
+CASE cfg=O3_native tier=tier3 op=normalize n=8192 reps=4000 med_ns=2725.9 min_ns=2699.5 ns_elem=0.3327 ns_elem_min=0.3295 gbps=48.08 chk=714.896 trials_ns= 2907.1 2782.6 2725.9 2712.1 2699.5
+CASE cfg=O3_native tier=tier3_rsqrt op=normalize n=8192 reps=4000 med_ns=2491.5 min_ns=2413.1 ns_elem=0.3041 ns_elem_min=0.2946 gbps=52.61 chk=714.896 trials_ns= 2413.1 2491.5 2498.6 2488.8 2603.8
+CASE cfg=O3_native tier=tier3 op=collision n=8192 reps=4000 med_ns=5211.8 min_ns=3924.0 ns_elem=0.6362 ns_elem_min=0.4790 gbps=50.30 chk=-1006.58 trials_ns= 5211.8 6570.4 6852.5 3924.0 4214.3
+CASE cfg=O3_native tier=tier3_rsqrt op=collision n=8192 reps=4000 med_ns=6133.7 min_ns=4449.0 ns_elem=0.7487 ns_elem_min=0.5431 gbps=42.74 chk=-1006.57 trials_ns= 4449.0 6133.7 7105.3 6665.3 5326.2
+CASE cfg=O3_native tier=tier1 op=add n=65536 reps=400 med_ns=92729.6 min_ns=89901.7 ns_elem=1.4149 ns_elem_min=1.3718 gbps=16.96 chk=1537.44 trials_ns= 127261.1 95488.6 92729.6 90761.0 89901.7
+CASE cfg=O3_native tier=tier1 op=scale n=65536 reps=400 med_ns=137882.7 min_ns=137448.2 ns_elem=2.1039 ns_elem_min=2.0973 gbps=7.60 chk=931.829 trials_ns= 137729.1 137882.7 141022.5 140398.4 137448.2
+CASE cfg=O3_native tier=tier1 op=dot n=65536 reps=400 med_ns=175769.8 min_ns=170361.8 ns_elem=2.6820 ns_elem_min=2.5995 gbps=5.97 chk=-1103.52 trials_ns= 170361.8 174424.2 181029.9 175769.8 178487.1
+CASE cfg=O3_native tier=tier1 op=dot_elem n=65536 reps=400 med_ns=117213.5 min_ns=115236.0 ns_elem=1.7885 ns_elem_min=1.7584 gbps=11.18 chk=-2207.04 trials_ns= 116412.1 118223.5 117897.1 115236.0 117213.5
+CASE cfg=O3_native tier=tier1 op=len n=65536 reps=400 med_ns=115748.0 min_ns=114175.7 ns_elem=1.7662 ns_elem_min=1.7422 gbps=11.32 chk=250963 trials_ns= 115794.2 115197.1 119437.6 114175.7 115748.0
+CASE cfg=O3_native tier=tier1 op=normalize n=65536 reps=400 med_ns=177640.9 min_ns=176102.1 ns_elem=2.7106 ns_elem_min=2.6871 gbps=5.90 chk=2061.71 trials_ns= 178276.7 178659.6 177640.9 177111.1 176102.1
+CASE cfg=O3_native tier=tier1 op=collision n=65536 reps=400 med_ns=466791.1 min_ns=452744.5 ns_elem=7.1227 ns_elem_min=6.9083 gbps=4.49 chk=84.2643 trials_ns= 452854.4 452744.5 466791.1 479560.3 501483.0
+CASE cfg=O3_native tier=tier2 op=add n=65536 reps=400 med_ns=21105.6 min_ns=20487.0 ns_elem=0.3220 ns_elem_min=0.3126 gbps=74.52 chk=1537.44 trials_ns= 20487.0 23154.5 20647.4 21105.6 23256.8
+CASE cfg=O3_native tier=tier2 op=scale n=65536 reps=400 med_ns=14960.9 min_ns=14001.1 ns_elem=0.2283 ns_elem_min=0.2136 gbps=70.09 chk=931.83 trials_ns= 14343.3 14001.1 14960.9 15746.7 14969.9
+CASE cfg=O3_native tier=tier2 op=dot n=65536 reps=400 med_ns=49777.9 min_ns=49739.8 ns_elem=0.7596 ns_elem_min=0.7590 gbps=21.07 chk=-1103.52 trials_ns= 51475.1 52402.3 49764.8 49777.9 49739.8
+CASE cfg=O3_native tier=tier2 op=dot_elem n=65536 reps=400 med_ns=18217.8 min_ns=17598.1 ns_elem=0.2780 ns_elem_min=0.2685 gbps=71.95 chk=-2207.04 trials_ns= 18217.8 19173.4 18106.4 17598.1 38442.8
+CASE cfg=O3_native tier=tier2 op=len n=65536 reps=400 med_ns=105360.3 min_ns=104159.7 ns_elem=1.6077 ns_elem_min=1.5894 gbps=12.44 chk=250963 trials_ns= 136085.9 118841.7 104999.6 105360.3 104159.7
+CASE cfg=O3_native tier=tier2 op=normalize n=65536 reps=400 med_ns=164834.2 min_ns=163757.9 ns_elem=2.5152 ns_elem_min=2.4987 gbps=6.36 chk=2061.73 trials_ns= 168289.0 163757.9 164834.2 164095.7 167199.4
+CASE cfg=O3_native tier=tier2 op=collision n=65536 reps=400 med_ns=267777.2 min_ns=258733.0 ns_elem=4.0860 ns_elem_min=3.9480 gbps=7.83 chk=84.2607 trials_ns= 258733.0 267777.2 285397.4 284321.6 259232.9
+CASE cfg=O3_native tier=tier3 op=add n=65536 reps=400 med_ns=19419.1 min_ns=18822.9 ns_elem=0.2963 ns_elem_min=0.2872 gbps=81.00 chk=1537.44 trials_ns= 20544.6 18822.9 19164.3 21388.9 19419.1
+CASE cfg=O3_native tier=tier3 op=scale n=65536 reps=400 med_ns=14216.0 min_ns=13948.5 ns_elem=0.2169 ns_elem_min=0.2128 gbps=73.76 chk=931.83 trials_ns= 14216.0 15223.8 14166.2 13948.5 14243.7
+CASE cfg=O3_native tier=tier3 op=dot n=65536 reps=400 med_ns=22212.1 min_ns=21405.6 ns_elem=0.3389 ns_elem_min=0.3266 gbps=47.21 chk=-1103.52 trials_ns= 22371.0 21935.9 21405.6 22270.3 22212.1
+CASE cfg=O3_native tier=tier3hadd op=dot n=65536 reps=400 med_ns=18388.8 min_ns=16206.1 ns_elem=0.2806 ns_elem_min=0.2473 gbps=57.02 chk=-1103.52 trials_ns= 16206.1 17439.5 18588.1 18388.8 18794.5
+CASE cfg=O3_native tier=tier3_4acc op=dot n=65536 reps=400 med_ns=11898.5 min_ns=11678.1 ns_elem=0.1816 ns_elem_min=0.1782 gbps=88.13 chk=-1103.52 trials_ns= 15182.3 12496.3 11898.5 11803.7 11678.1
+CASE cfg=O3_native tier=tier3 op=dot_elem n=65536 reps=400 med_ns=18899.4 min_ns=17818.3 ns_elem=0.2884 ns_elem_min=0.2719 gbps=69.35 chk=-2207.04 trials_ns= 21273.7 17818.3 17818.6 20185.3 18899.4
+CASE cfg=O3_native tier=tier3 op=len n=65536 reps=400 med_ns=14218.0 min_ns=13044.4 ns_elem=0.2169 ns_elem_min=0.1990 gbps=92.19 chk=250963 trials_ns= 13044.4 13819.2 14867.9 14684.2 14218.0
+CASE cfg=O3_native tier=tier3 op=normalize n=65536 reps=400 med_ns=24786.3 min_ns=22551.7 ns_elem=0.3782 ns_elem_min=0.3441 gbps=42.30 chk=2061.73 trials_ns= 25384.9 24786.3 22998.3 24831.0 22551.7
+CASE cfg=O3_native tier=tier3_rsqrt op=normalize n=65536 reps=400 med_ns=21093.2 min_ns=19977.9 ns_elem=0.3219 ns_elem_min=0.3048 gbps=49.71 chk=2061.72 trials_ns= 19977.9 21093.2 20882.8 21113.2 21431.6
+CASE cfg=O3_native tier=tier3 op=collision n=65536 reps=400 med_ns=37441.2 min_ns=35252.0 ns_elem=0.5713 ns_elem_min=0.5379 gbps=56.01 chk=84.2607 trials_ns= 35769.1 37441.2 35252.0 37683.3 40053.4
+CASE cfg=O3_native tier=tier3_rsqrt op=collision n=65536 reps=400 med_ns=39934.6 min_ns=39180.7 ns_elem=0.6094 ns_elem_min=0.5979 gbps=52.51 chk=84.263 trials_ns= 39525.8 39934.6 39180.7 40017.1 40841.0
+CASE cfg=O3_native tier=tier1 op=add n=1048576 reps=100 med_ns=4980424.2 min_ns=4852894.0 ns_elem=4.7497 ns_elem_min=4.6281 gbps=5.05 chk=11455.3 trials_ns= 4950215.4 4980424.2 4852894.0 5181341.4 5425859.2
+CASE cfg=O3_native tier=tier1 op=scale n=1048576 reps=100 med_ns=4153327.7 min_ns=3915356.1 ns_elem=3.9609 ns_elem_min=3.7340 gbps=4.04 chk=3739.44 trials_ns= 3915356.1 4128538.1 4153327.7 4453314.8 4192107.4
+CASE cfg=O3_native tier=tier1 op=dot n=1048576 reps=100 med_ns=3590087.9 min_ns=3521622.1 ns_elem=3.4238 ns_elem_min=3.3585 gbps=4.67 chk=-2163.1 trials_ns= 3603834.3 3561553.9 3521622.1 3627654.3 3590087.9
+CASE cfg=O3_native tier=tier1 op=dot_elem n=1048576 reps=100 med_ns=5256630.4 min_ns=5036873.9 ns_elem=5.0131 ns_elem_min=4.8035 gbps=3.99 chk=-4326.2 trials_ns= 5465420.3 5256630.4 5298606.3 5036873.9 5184099.9
+CASE cfg=O3_native tier=tier1 op=len n=1048576 reps=100 med_ns=3975265.4 min_ns=3876067.9 ns_elem=3.7911 ns_elem_min=3.6965 gbps=5.28 chk=4.01018e+06 trials_ns= 3904229.3 3876067.9 3978054.7 3975265.4 4100076.4
+CASE cfg=O3_native tier=tier1 op=normalize n=1048576 reps=100 med_ns=4460198.2 min_ns=4242383.6 ns_elem=4.2536 ns_elem_min=4.0459 gbps=3.76 chk=11339.5 trials_ns= 4460198.2 4502049.8 4311153.0 4242383.6 4523586.2
+CASE cfg=O3_native tier=tier1 op=collision n=1048576 reps=100 med_ns=8402161.6 min_ns=8294458.5 ns_elem=8.0129 ns_elem_min=7.9102 gbps=3.99 chk=-2800.42 trials_ns= 8350506.2 8402161.6 8294458.5 8693522.5 8474931.1
+CASE cfg=O3_native tier=tier2 op=add n=1048576 reps=100 med_ns=6496461.5 min_ns=5964645.1 ns_elem=6.1955 ns_elem_min=5.6883 gbps=3.87 chk=11455.4 trials_ns= 5964645.1 5989687.1 9215477.6 7457990.0 6496461.5
+CASE cfg=O3_native tier=tier2 op=scale n=1048576 reps=100 med_ns=4009776.4 min_ns=3969641.9 ns_elem=3.8240 ns_elem_min=3.7857 gbps=4.18 chk=3739.48 trials_ns= 4009776.4 3969641.9 4224418.7 4630096.3 3982318.5
+CASE cfg=O3_native tier=tier2 op=dot n=1048576 reps=100 med_ns=3244094.8 min_ns=2595910.6 ns_elem=3.0938 ns_elem_min=2.4757 gbps=5.17 chk=-2163.1 trials_ns= 2595910.6 3074996.7 3437032.4 3320979.8 3244094.8
+CASE cfg=O3_native tier=tier2 op=dot_elem n=1048576 reps=100 med_ns=6728278.4 min_ns=5702432.8 ns_elem=6.4166 ns_elem_min=5.4383 gbps=3.12 chk=-4326.2 trials_ns= 6892765.9 5702432.8 6094480.5 6728278.4 10062311.8
+CASE cfg=O3_native tier=tier2 op=len n=1048576 reps=100 med_ns=5203726.4 min_ns=4164055.5 ns_elem=4.9627 ns_elem_min=3.9712 gbps=4.03 chk=4.01018e+06 trials_ns= 7544557.5 6300350.1 5203726.4 4304485.0 4164055.5
+CASE cfg=O3_native tier=tier2 op=normalize n=1048576 reps=100 med_ns=4852790.5 min_ns=4374908.6 ns_elem=4.6280 ns_elem_min=4.1722 gbps=3.46 chk=11339.6 trials_ns= 4852790.5 4686979.4 4925582.9 5223456.7 4374908.6
+CASE cfg=O3_native tier=tier2 op=collision n=1048576 reps=100 med_ns=7330639.2 min_ns=7065773.0 ns_elem=6.9910 ns_elem_min=6.7384 gbps=4.58 chk=-2800.54 trials_ns= 7250254.2 7330639.2 7856204.0 7065773.0 8287323.5
+CASE cfg=O3_native tier=tier3 op=add n=1048576 reps=100 med_ns=6102773.4 min_ns=5872760.5 ns_elem=5.8201 ns_elem_min=5.6007 gbps=4.12 chk=11455.4 trials_ns= 6811584.8 7338292.8 5937541.1 6102773.4 5872760.5
+CASE cfg=O3_native tier=tier3 op=scale n=1048576 reps=100 med_ns=4436141.3 min_ns=4341997.6 ns_elem=4.2306 ns_elem_min=4.1409 gbps=3.78 chk=3739.48 trials_ns= 4556532.1 4341997.6 4410593.8 4436141.3 4805340.9
+CASE cfg=O3_native tier=tier3 op=dot n=1048576 reps=100 med_ns=2481097.0 min_ns=2398387.6 ns_elem=2.3662 ns_elem_min=2.2873 gbps=6.76 chk=-2163 trials_ns= 2686849.8 2583637.6 2481097.0 2398387.6 2419126.9
+CASE cfg=O3_native tier=tier3hadd op=dot n=1048576 reps=100 med_ns=2429305.4 min_ns=2329241.9 ns_elem=2.3168 ns_elem_min=2.2213 gbps=6.91 chk=-2163.08 trials_ns= 2329241.9 2392443.4 2475670.9 2429305.4 2432135.6
+CASE cfg=O3_native tier=tier3_4acc op=dot n=1048576 reps=100 med_ns=2351821.7 min_ns=2286923.1 ns_elem=2.2429 ns_elem_min=2.1810 gbps=7.13 chk=-2163.04 trials_ns= 2468907.6 2351821.7 2397216.0 2286923.1 2345687.6
+CASE cfg=O3_native tier=tier3 op=dot_elem n=1048576 reps=100 med_ns=5191206.0 min_ns=5155759.5 ns_elem=4.9507 ns_elem_min=4.9169 gbps=4.04 chk=-4326.2 trials_ns= 5155759.5 5179795.7 5522517.4 5350259.4 5191206.0
+CASE cfg=O3_native tier=tier3 op=len n=1048576 reps=100 med_ns=3908153.0 min_ns=3761793.5 ns_elem=3.7271 ns_elem_min=3.5875 gbps=5.37 chk=4.01018e+06 trials_ns= 3761793.5 3850570.7 4112732.6 3912465.9 3908153.0
+CASE cfg=O3_native tier=tier3 op=normalize n=1048576 reps=100 med_ns=3966264.3 min_ns=3915633.1 ns_elem=3.7825 ns_elem_min=3.7342 gbps=4.23 chk=11339.6 trials_ns= 3966264.3 3915633.1 3958705.3 4125339.3 4199487.3
+CASE cfg=O3_native tier=tier3_rsqrt op=normalize n=1048576 reps=100 med_ns=3990508.0 min_ns=3718122.8 ns_elem=3.8056 ns_elem_min=3.5459 gbps=4.20 chk=11339.6 trials_ns= 4053875.9 3964581.1 3718122.8 3990508.0 3997734.6
+CASE cfg=O3_native tier=tier3 op=collision n=1048576 reps=100 med_ns=7563449.6 min_ns=7152509.5 ns_elem=7.2131 ns_elem_min=6.8212 gbps=4.44 chk=-2800.54 trials_ns= 7504832.5 8548796.3 9335305.9 7152509.5 7563449.6
+CASE cfg=O3_native tier=tier3_rsqrt op=collision n=1048576 reps=100 med_ns=7296364.7 min_ns=6868766.1 ns_elem=6.9584 ns_elem_min=6.5506 gbps=4.60 chk=-2800.53 trials_ns= 8225946.2 7877108.0 7095032.5 6868766.1 7296364.7
+# loadavg_after=3.23 3.66 4.02 4/2602 156689
+# cpu_khz_after=4241121
