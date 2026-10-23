@@ -8,7 +8,7 @@
 
 ## 0. 结论速览（先看这 8 条）
 
-1. **N = 1<<20（每数组 4 MB，工作集 24 MB > 8 MB L3）时，三档没有差别。** add 档1 = 5.33、档2 = 5.48、
+1. **N = 1<<20（每数组 4 MB，工作集 24 MB，远超单线程可见的 4 MiB L3 —— 芯片总量 8 MiB = 2×CCX 4 MiB）时，三档没有差别。** add 档1 = 5.33、档2 = 5.48、
    档3 = 6.77 ns/elem（x0.97 / x0.79）；只有 collision（x1.34–1.41）和 normalize（x1.06–1.14）有稳定收益。
    原因不是"SIMD 没用"，而是三档都撞在这台机器的**内存带宽墙**上：实测 triad 只有 5.3–7.0 GB/s、
    memcpy 9.1–17.5 GB/s（§3.3）。→ **在 1<<20 这个规模上，自动向量化和手写 AVX2 都白写。**
@@ -102,7 +102,7 @@ void   fv_vec2_normalize_soa(const float *ax, const float *ay, float *ox, float 
 |---|---|
 | CPU | AMD Ryzen 7 5700U with Radeon Graphics（Zen 2，8 核 16 线程） |
 | 指令集 | AVX2 + FMA 可用；**AVX-512 全部 disabled**（`-march=native` → `znver2`） |
-| L1d / L2 / L3 | 256 KiB（8×32 KiB） / 4 MiB（8×512 KiB） / 8 MiB（2×4 MiB） |
+| L1d / L2 / L3 | 256 KiB（8×32 KiB） / 4 MiB（8×512 KiB） / **8 MiB（2×4 MiB）= 芯片总量；单线程只见自己 CCX 的 4 MiB**（`/sys/.../index3`：`size=4096K shared_cpu_list=0-7`，拐点按 4 MiB 算 = 1.75×10`5` 元素） |
 | 编译器 | g++ (Ubuntu 12.4.0-2ubuntu1~24.04.1) 12.4.0 |
 | perf | perf 6.17.13 存在，但被 `perf_event_paranoid=4` 挡住（§5） |
 | 调速器 | `performance`；实测运行中 scaling_cur_freq 在 1.70–4.22 GHz 间变动 |
@@ -185,7 +185,7 @@ void   fv_vec2_normalize_soa(const float *ax, const float *ay, float *ox, float 
 | normalize | 2.7905 | 2.5382 (x1.10) | 0.3021 (x9.24) | 2.5544 (x1.09) | 0.3751 (x7.44) | rsqrt 0.3691 | 42.7 |
 | collision | 7.9121 | 4.7021 (x1.68) | 0.6592 (x12.00) | 4.5492 (x1.74) | 0.6354 (x12.45) | rsqrt 0.6898 | 50.4 |
 
-**N = 1048576（每数组 4 MB，工作集 24 MB > L3 8 MB）** —— 三档撞在内存墙上：
+**N = 1048576（每数组 4 MB，工作集 24 MB，远超单线程可见的 4 MiB L3；芯片总量 8 MiB = 2×CCX）** —— 三档撞在内存墙上：
 
 | 运算 | 档1 | 档2 | 档2 +fast-math | 档2 +no-math-errno | 档3 | 档3 GB/s |
 |---|---|---|---|---|---|---|
@@ -537,6 +537,11 @@ $ make bench-perf           # 需先 sudo sysctl -w kernel.perf_event_paranoid=1
 | `docs/research/raw/bench_*.txt` | 每行一个 CASE/DIFF/IDENT 的原始日志（含 5 次 trial） |
 | `docs/research/raw/{matrix,table}.{txt,md}` | 由日志生成的两张表 |
 | `docs/research/raw/{membw,env,evidence,vect_verdicts,ident_check}.txt` | 带宽、环境、反汇编节选、向量化裁决、精度对照 |
+
+> 注意：上表这些文件是每次 `make bench` / `make run` **覆盖**写出的，不是不可变存档。引用时必须
+> 连同时刻一起写（文件 mtime 就是那一轮的时刻，header 行有 label/rev）；同一台机器上「可分辨点数」
+> 在四次运行里分别是 90 / 92 / 93 / 107（分母恒为 304），全点中位比 1.0063–1.0079，这些数会随
+> 重跑漂移。需要长期对比的结论请抄进分析文档，不要直接依赖 raw 里的数字。
 
 本次未改动 `include/`、`src/`、`tests/` 的任何既有内容；根 `Makefile` 只在末尾**追加**了 `bench*` 转发目标
 （前 39 行与原文件逐字节相同，`make test` 仍全绿）。

@@ -3,9 +3,23 @@
 独立第三方验收：不读实现者的自述，全部数字由本目录的夹具现场跑出。
 **只拥有 verify/**，未修改 include/ src/ tests/ bench/ 根 Makefile docs/。
 
+> **有效性边界（2026-10 重构后补记，请先读这段）**
+> 库在本文写作之后经历了三次大改：批量入口的实现搬进 `include/flashvec.h` 的 `static inline`、
+> 新增 `_stream` / `_mask_inplace` / `fv_vec4` / vec3·vec4 的 SoA 批量、以及 L3 尺寸的更正。
+> 因此：
+> * **§6 的结构检查已经按新架构重写**（`checks.sh`，11 条规则，逐条写明旧定义→新定义），
+>   本文末尾「结构检查覆盖…」那一节是它的规则清单。
+> * **§1 的位级对拍、§2 的性能数字来自重构前的快照**（`build/parity_*`、`build/perf_*` 的时间戳
+>   是 10-17 / 10-23，早于这次重构）。它们证明的是当时那份源码；要在当前工作树上重新取得证据，
+>   必须重跑 `make parity` / `make perf`。**在那之前，这两个数字表不可当作当前代码的验收证据。**
+> * 机器口径也已更正：L3 是 **4 MiB/CCX × 2 CCX = 8 MiB 芯片总量，单线程可见 4 MiB**（见下），
+>   本文 §2 里凡是按「8 MB L3」推的拐点都要按 4 MiB 重算。
+
 * 机器：AMD Ryzen 7 5700U（8 核 16 线程，AVX2 + FMA，L2 512 KiB/核，L3 4 MiB/CCX x2）
 * 编译器：g++ (Ubuntu 12.4.0-2ubuntu1~24.04.1) 12.4.0，内核 6.17.0-19-generic
-* 被验证版本：src/flashvec.cpp（P0）+ src/flashvec_batch.cpp（P1，19 KB）+ include/flashvec.h
+* 被验证版本（重构前）：src/flashvec.cpp（P0）+ src/flashvec_batch.cpp（P1）+ include/flashvec.h。
+  重构后：实现的唯一一份在 `include/flashvec.h`（`static inline`），`src/flashvec_batch.cpp`
+  只剩 33 个 `extern` 转发符号，另新增 `src/flashvec_vec4.cpp`。
 * 本目录产物：parity.cpp（位级一致性）、perf.cpp（基准）、c_api_check.c（纯 C ABI）、checks.sh（结构检查）、
   ref_strict.{h,cpp}（我自己的标量参考，单独 TU、-ffp-contract=off）、Makefile（独立构建）、build/*.txt（原始输出留档）
 
@@ -176,11 +190,25 @@ ASan+UBSan 无报错（我先修掉了自己夹具里的 new Stat() 泄漏，之
 关键原始输出（都在 verify/build/）：parity_O2_plain.txt、parity_O3_native.txt、parity_asan.txt、
 perf_O3_native.txt、c_api_check.txt、test_flashvec_F.txt、test_c_api_F.txt、checks.txt。
 
-结构检查（checks.sh，只读仓库文件）覆盖：头文件无 intrinsics/C++ 语法（且 cc -std=c11 -pedantic-errors
-可编译并链接运行）、默认构建无 -march=native/-mavx2/-ffast-math、AVX2 内核用 target("avx2,fma") 单函数实现、
-11 处派发点全部写成 __builtin_cpu_supports("avx2") != 0、源码无 FMA/倒数近似 intrinsics、
-**不带 -march=native 的对象里 AVX2 内核仍然存在**（fv_add4_avx2 / fv_add_soa_avx2 / fv_dot_soa_avx2 等
-11 个文件内静态符号，入口函数只有 testb/je/call 派发），以及 objdump 逐符号指令普查（两档 TU 的 vfmadd* 计数均为 0）。
+### 结构检查（checks.sh，只读仓库文件）：11 条规则，逐条都有 PASS/FAIL，任何一条 FAIL → 退出码非 0
+
+重构后重写过。每条规则在脚本里都写着「旧定义 → 新定义 + 为什么必须改」。要点：
+
+| # | 现在检查什么 | 相对旧规则变了什么 |
+|---|---|---|
+| 1 | 纯 C（`cc -std=c11 -pedantic-errors`）可编译；`immintrin` 展开行数 **> 0**（正对照）；头文件无 C++ 语法 | **判据反转**：旧规则要求头文件里 `immintrin` 行数为 0，重构后实现就在头文件里，为 0 反而说明封装坏了 |
+| 2 | `FV_USE_EXTERN` 形态的**包含集**里没有 `math.h` / `string.h` / `immintrin.h` / `stdlib.h`，且可被纯 C `-pedantic-errors` 编译 | **判据换形式**：旧规则是「头文件不得含 target 属性/builtin（应为纯声明）」，现在把等价事实变成可判定的包含集比较 |
+| 3 | `make -C .. -n -B all` 打出的每条 `-c src/…` 命令都不含 `-march=native/-mavx/-ffast-math/-mfma`；`FMA_FLAGS` 只被 `*_cpp_fma.o` 引用 | **判据落到实际命令**：旧规则 grep 全文件，会把「敌意选项对拍夹具」判死；现在直接问 make 默认目标执行什么（更严） |
+| 4 | `__builtin_cpu_supports` 与 `target(` 扫**头文件**；32 处派发全部写成 `!= 0`；并报告 `src/*.cpp` 里为 0 | **扫描目标迁移**：旧规则扫 `src/*.cpp`，重构后那里一处都没有 |
+| 5 | `include/` + `src/` 里 FMA / rcpps / rsqrtps / **maskload / maskstore（VMASKMOVPS）** 内建名 = 0；注释里提到助记符不算 | **范围扩到实现真正所在处**，并新增 VMASKMOVPS 禁用项 |
+| 6 | 头文件写明归约顺序免责 + 掩码语义（原样保留，新增 PASS 判据） | 不变 |
+| 7 | 机器/编译器事实（INFO，不设判据）；额外打印 `index2/index3` 的 `size` 与 `shared_cpu_list` | 新增缓存层级实测，防止文档与机器再次漂移 |
+| 8 | **产物级指令普查**：脚本自己按 `-O3 -march=native -mfma -ffp-contract=fast` 编 4 个对象（3 个库 TU + 纯 C 的 `test_stream.c`），`vfmadd/vfmsub/vfnmadd/vrcpps/vrsqrtps/haddps/vmaskmovps` **合计必须为 0**，`vmovntps` **必须 > 0** | **对象不再用 build/ 里的过期产物**；配置从 `-O3 -march=native` 升级到最狠的一档（并加 `-mfma`），禁用项从 6 项扩到 7 项，新增 NT store 正对照 |
+| 9 | 不带 `-march=native` 的默认档里：`fv_i_*_avx2` 局部符号存在、有 AVX2 指令、对象引用 `__cpu_model` 且在 `0x400`（avx2 位）上判断 | **判据改成消费者视角**：内核是头文件 static inline，所以「内核还在」对每个消费 TU 都成立；派发证据从「call 关系」换成「`__cpu_model` + avx2 位」 |
+| 10 | 默认档实测摘要（只引已有产物；本脚本**不做性能测量**），并识别 26 字节的已知垃圾文件 | 不变（新增垃圾文件识别） |
+| 11 | **新增**：`fv_i_maskload_add4_avx2` / `fv_i_maskstore_add4_avx2` 在整仓出现次数必须为 0 | 全新规则：这两个名字绑定被实测否决的 VMASKMOVPS 稀疏策略，不许复活 |
+
+运行：`bash verify/checks.sh`（同时写 `build/checks.txt`；退出码 0 = 全部 PASS）。
 
 ---
 

@@ -1,7 +1,7 @@
 # flashvec · 数据布局 / 内存层次 / 批处理 API 形态
 
 > 调研员 C2。本笔记只做**阅读 + 判断**，不新增实验：数字全部来自 [measured.md](measured.md)（三档实测）、[simd-hardware.md](simd-hardware.md)（SIMD/ABI）、[algorithm-tricks.md](algorithm-tricks.md)（休眠体约束）与本机 [raw/](raw/)。无标记 = 有实测依据；标「**未验证**」= 本组未测、未逐字核对上游源码/文档。
-> 本机：AMD Ryzen 7 5700U（Zen 2, 8C/16T）· L1d 32 KiB/核 · L2 512 KiB/核 · L3 8 MiB · 行 64 B · AVX2+FMA，无 AVX-512。
+> 本机：AMD Ryzen 7 5700U（Zen 2, 8C/16T）· L1d 32 KiB/核 · L2 512 KiB/核 · **L3 4 MiB/CCX × 2 CCX = 8 MiB 芯片总量，单线程可见 4 MiB** · 行 64 B · AVX2+FMA，无 AVX-512。
 
 ---
 
@@ -61,7 +61,7 @@ float fv_vec2_dot_soa (const float *ax, const float *ay,
 
 | 判据 | 阈值 | 依据 |
 |---|---|---|
-| **活跃元素数** | ≤ 3×10`5`（工作集 ≈ 8 MB L3）时 SIMD 收益能兑现；≥ 1×10`6` 回归带宽墙 | measured.md §0 条 1；§2.1 粗算 |
+| **活跃元素数** | ≤ **1.75×10`5`**（工作集 ≈ 单线程可见的 4 MiB L3）时 SIMD 收益能兑现；≥ 1×10`6` 回归带宽墙 | measured.md §0 条 1；§2.1 粗算（已按 sysfs 实测更正：旧值 3×10`5` 是按芯片总量 8 MiB 算的，高了一倍） |
 | **同构运算密度** | 同一批元素在一个热循环里被 ≥2 个同构运算处理才值得拆布局；只有 1 个运算时拆装成本必亏 | 定性；collide 微内核是典型「≥3 个」 |
 | **是否被多个消费者读** | 位置同时被积分器 / broad-phase / 渲染读 → 值得按消费者拆轴（PhysX 式） | §1.2 |
 | **稀疏度** | 休眠/剔除比例 > ~30% 时「连续前 n 个」收益被空转吃掉 → 必须先有索引/掩码变体 | algorithm-tricks.md L165 |
@@ -72,7 +72,12 @@ float fv_vec2_dot_soa (const float *ax, const float *ay,
 
 ### 2.1 为什么 N=1<<20 时「代码怎么写都一样」
 
-本机 `lscpu` 原文（[raw/env.txt](raw/env.txt)）：`L1d cache: 256 KiB (8 instances)`（32 KiB/核）、`L2 cache: 4 MiB (8 instances)`（512 KiB/核）、`L3 cache: 8 MiB (2 instances)`（两实例合计 8 MiB；单实例口径与 lscpu 计数有出入，**不影响结论**：24 MB 工作集远大于任一 L3 实例）。
+本机 `lscpu` 原文（[raw/env.txt](raw/env.txt)）：`L1d cache: 256 KiB (8 instances)`（32 KiB/核）、`L2 cache: 4 MiB (8 instances)`（512 KiB/核）、`L3 cache: 8 MiB (2 instances)`。
+
+**「2 instances」就是 2 个 CCX，每个 4 MiB** —— 这不只是 lscpu 的计数口径，`/sys/devices/system/cpu/cpu0/cache/index3` 直接给出 `level=3, size=4096K, shared_cpu_list=0-7`（同一 CCX 的 4 个物理核 / 8 个线程共享 4 MiB）。所以：
+
+- **8 MiB 是芯片总量，单线程看得见的是 4 MiB**；旧版本笔记里「L3 8 MiB 共享」这个表述是错的（它把总量当成了单线程可用量）。
+- 24 MB 工作集仍远大于任一 L3 实例，所以本节「三档撞带宽墙」的结论不变；但**拐点元素数必须按 4 MiB 算**（1.75×10`5`，见下条），旧值 3×10`5` 高了一倍。
 
 `bench/membw.c` 实测（[raw/membw.txt](raw/membw.txt)，taskset -c 2，每项 5 次取最小）：
 
@@ -86,7 +91,7 @@ N=8388608          96.0         6.07         8.09         3.78         7.63     
 **粗算（本笔记推导，非实测）**：add 每元素读 2×8 B、写 1×8 B = 24 B 逻辑访存；N=1<<20 工作集 3×8 MB = 24 MB，按 triad 6.9 GB/s ⇒ **≈3.5 ns/elem 的理论下限**，实测 5.3–6.8 ns/elem（有效 3.5–4.5 GB/s）。**三档撞在同一堵墙上，所以 measured.md §0 条 1 说「在 1<<20 这个规模上，自动向量化和手写 AVX2 都白写」。**
 
 三点必须说清：
-- **拐点在 3×10`5` 元素量级**（8 MB L3 ÷ 24 B/元素）。引擎每帧只处理几千～几万活跃体时正好落在「SIMD 收益兑现」一侧；超过百万回到带宽墙，此时唯一有效手段是**减少访存量**（降精度、跳过休眠体、分块），不是换指令。
+- **拐点在 1.75×10`5` 元素量级**（**单线程可见的 4 MiB** ÷ 24 B/元素 = 174 762；若误按芯片总量 8 MiB 会算成 3×10`5`，高了一倍）。这条有直接实测：同进程 A/B 夹具在 **2^17（工作集 3 MB）38–57 GB/s，2^18（6 MB）5.6–8.8 GB/s**，断崖正好压在这条线上。引擎每帧只处理几千～几万活跃体时正好落在「SIMD 收益兑现」一侧；超过百万回到带宽墙，此时唯一有效手段是**减少访存量**（降精度、跳过休眠体、分块），不是换指令。
 - **membw 两次独立运行有 10–15% 漂移**（raw/membw.txt 的 write=12.33 vs measured.md §3.3 粘贴的 14.05；triad 6.91 vs 7.01）。本笔记引用 **raw/** 的值；10% 以内的差距在这台机器上不该当结论。
 - **measured.md 的 8–14x 是 L2 驻留数字，不是 L1 峰值**：N=8192 的 SoA 形态下 4 输入 + 2 输出分量数组 ≈ 192 KB，超出 32 KB L1d、落在 512 KB L2 内。这个区间恰好是真实引擎的活跃集大小，所以结论**可迁移**。
 

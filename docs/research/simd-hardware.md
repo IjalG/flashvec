@@ -128,6 +128,12 @@ xsimd [include/xsimd/types/xsimd_batch.hpp#L215](https://github.com/xtensor-stac
 - **头文件 guard**：intrinsics 依赖 `-mavx2`/target 属性，别写进纯 C 的 `flashvec.h`（该头必须保持 `-x c` 可编译）。
   建议新增 `include/flashvec_simd.h`（C++/内部用）并把 `#include <immintrin.h>` 放在 `.cpp` 里，用
   `#if defined(__AVX2__) || defined(FLASHVEC_TARGET_AVX2)` 之类的自有宏门控。
+  > **2026-10 补记（实际落地了什么）**：最终没有单独开 `flashvec_simd.h`，而是留在 `flashvec.h` 里用自有宏门控 ——
+  > `FV_I_INTRINSICS && !FV_USE_EXTERN` 才 `#include <immintrin.h>`。原约束「该头必须保持 `-x c` 可编译」
+  > 仍然成立且有回归证据：`cc -std=c11 -pedantic-errors` 编译通过，`FV_USE_EXTERN` 形态的包含集不含
+  > `immintrin.h`/`math.h`/`string.h`（`verify/checks.sh` [1][2] 段）。另外一条本笔记当时没料到的：
+  > `target("avx2")` 挡不住**调用方命令行**带来的 `-mfma`，所以头文件里还加了
+  > `#pragma GCC optimize("fp-contract=off")` 作为消费者侧的防线。
 - **运行时派发三种做法**（均在本机验证）：
   1. `__builtin_cpu_supports("avx2")` 分支 —— 反汇编是 `mov __cpu_model(%rip),%rax` + `testb $0x4,0xd(%rax)` + `jmp`，
      即「一次全局 load + test」，**不是**每次 CPUID，开销可忽略；
