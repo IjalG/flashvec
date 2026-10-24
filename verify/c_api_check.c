@@ -30,7 +30,7 @@ int main(void)
 {
     /* ---- P0 常量 ---- */
     chk("FV_EPS == 1e-6f", FV_EPS == (fv_real)1e-6f);
-    chk("FV_EPS_SQR == 1e-12f 且 == FV_EPS*FV_EPS", FV_EPS_SQR == (fv_real)1e-12f && FV_EPS_SQR == FV_EPS * FV_EPS);
+    chk("FV_EPS_SQR == 1e-12f and == FV_EPS*FV_EPS", FV_EPS_SQR == (fv_real)1e-12f && FV_EPS_SQR == FV_EPS * FV_EPS);
 
     /* ---- 逐分量 (a<b)?a:b 契约，全部在合法区间 / 非 NaN 数据上 ---- */
     {
@@ -42,8 +42,8 @@ int main(void)
         fv_vec2 md = fv_vec2_madd(a, b, 2.0f);
         chk("vec2 min((1,2),(3,4)) = (1,2)", mn.x == 1.0f && mn.y == 2.0f);
         chk("vec2 max((1,2),(3,4)) = (3,4)", mx.x == 3.0f && mx.y == 4.0f);
-        chk("vec2 clamp 界内 (1,2)->(1,2)", c_in.x == 1.0f && c_in.y == 2.0f);
-        chk("vec2 clamp 界外 (20,-5)->(10,0)", c_out.x == 10.0f && c_out.y == 0.0f);
+        chk("vec2 clamp in range (1,2)->(1,2)", c_in.x == 1.0f && c_in.y == 2.0f);
+        chk("vec2 clamp out of range (20,-5)->(10,0)", c_out.x == 10.0f && c_out.y == 0.0f);
         chk("vec2 madd(a,b,2) = (7,10)", md.x == 7.0f && md.y == 10.0f && md.x == mul_then_add(1.0f, 3.0f, 2.0f));
 
         {
@@ -52,10 +52,10 @@ int main(void)
             fv_vec3 in3 = fv_vec3_clamp(p, lo3, hi3);
             fv_vec3 out3 = fv_vec3_clamp(fv_vec3_make(0.0f, 9.0f, 9.0f), lo3, hi3);
             fv_vec3 md3 = fv_vec3_madd(p, q, 0.5f);
-            chk("vec3 min/max 逐分量", lo3.x == 1.0f && lo3.y == 2.0f && lo3.z == 1.0f &&
+            chk("vec3 min/max per component", lo3.x == 1.0f && lo3.y == 2.0f && lo3.z == 1.0f &&
                                        hi3.x == 3.0f && hi3.y == 2.0f && hi3.z == 3.0f);
-            chk("vec3 clamp 界内 = 原值", in3.x == p.x && in3.y == p.y && in3.z == p.z);
-            chk("vec3 clamp 界外 (0,9,9)->(1,2,3)", out3.x == 1.0f && out3.y == 2.0f && out3.z == 3.0f);
+            chk("vec3 clamp in range = original", in3.x == p.x && in3.y == p.y && in3.z == p.z);
+            chk("vec3 clamp out of range (0,9,9)->(1,2,3)", out3.x == 1.0f && out3.y == 2.0f && out3.z == 3.0f);
             chk("vec3 madd(p,q,0.5) = (2.5,3,3.5)", md3.x == 2.5f && md3.y == 3.0f && md3.z == 3.5f);
         }
 
@@ -65,7 +65,7 @@ int main(void)
             fv_aabb2 o2 = { fv_vec2_make(0.5f, 0.5f), fv_vec2_make(2.0f, 2.0f) };
             fv_aabb2 far = { fv_vec2_make(9.0f, 9.0f), fv_vec2_make(10.0f, 10.0f) };
             chk("aabb2_merge = [min(lo,p), max(hi,p)]", m2.lo.x == -1.0f && m2.lo.y == 0.0f && m2.hi.x == 1.0f && m2.hi.y == 2.0f);
-            chk("aabb2_overlaps 相交=1 / 相离=0", fv_aabb2_overlaps(box, o2) == 1 && fv_aabb2_overlaps(box, far) == 0);
+            chk("aabb2_overlaps hit=1 / miss=0", fv_aabb2_overlaps(box, o2) == 1 && fv_aabb2_overlaps(box, far) == 0);
         }
     }
 
@@ -87,7 +87,7 @@ int main(void)
         }
         fv_vec2_add_x4(a, b, o, N);
         for (i = 0; i < N; ++i) if (o[i].x != rl[i].x || o[i].y != rl[i].y) ok = 0;
-        chk("add_x4 全 9 个元素正确（含尾巴）", ok);
+        chk("add_x4 all 9 elements correct (tail included)", ok);
         fv_vec2_sub_x4(a, b, o, N);   fv_vec2_scale_x4(a, 2.0f, o, N);
         fv_vec2_lerp_x4(a, b, 0.5f, o, N); fv_vec2_madd_x4(a, b, 2.0f, o, N);
         fv_vec2_add_x4_mask(a, b, o, mask, N);
@@ -96,7 +96,7 @@ int main(void)
             if (mask[i]) { if (o[i].x != rl[i].x || o[i].y != rl[i].y) ok = 0; }
             else if (o[i].x != a[i].x || o[i].y != a[i].y) ok = 0;   /* 掩码外必须写回 a[i] 原值 */
         }
-        chk("add_x4_mask 掩码外逐位等于 a[i]", ok);
+        chk("add_x4_mask: masked-out lanes keep a[i]", ok);
         fv_vec2_add_x4_idx(a, b, o, idx, N);
         fv_vec2_scale_x4_idx(a, 2.0f, o, idx, N);
         fv_vec2_add_soa(ax, ay, bx, by, ox, oy, N);
@@ -105,7 +105,7 @@ int main(void)
             float dot = fv_vec2_dot_soa(ax, ay, bx, by, N);
             fv_vec2_len_soa(ax, ay, lo, N);
             fv_vec2_normalize_soa(ax, ay, ox, oy, N);
-            chk("SoA 入口可从纯 C 调用且产出有限值", dot == dot && lo[0] > 0.0f && ox[0] == ox[0]);
+            chk("SoA entries callable from C, finite output", dot == dot && lo[0] > 0.0f && ox[0] == ox[0]);
         }
     }
 
@@ -115,10 +115,10 @@ int main(void)
         fv_vec2 nn = fv_vec2_make(0.0f / nan_v, 1.0f);           /* (NaN, 1) */
         fv_vec2 zz = fv_vec2_make(0.0f, 0.0f);
         fv_vec2 mn = fv_vec2_min(nn, zz);
-        printf("  %-46s INFO  min((NaN,1),(0,0)) = (%.1f,%.1f)：契约 (a<b)?a:b 给出 (0,0)；IEEE fminf 会给 (0,1)\n",
-               "min 的 NaN 语义与 fminf 的差异", (double)mn.x, (double)mn.y);
+        printf("  %-46s INFO  min((NaN,1),(0,0)) = (%.1f,%.1f): the (a<b)?a:b contract gives (0,0); IEEE fminf would give (0,1)\n",
+               "min NaN semantics vs fminf", (double)mn.x, (double)mn.y);
     }
 
-    printf("\nc_api_check: %s\n", g_fail ? "FAIL" : "全部 PASS");
+    printf("\nc_api_check: %s\n", g_fail ? "FAIL" : "all PASS");
     return g_fail ? 1 : 0;
 }

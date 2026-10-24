@@ -254,6 +254,9 @@ answer was no". Read it before redoing anything, and give the physical reason wh
 cannot give one, do not re-run; a re-run only buys another noisy reading. Every item carries the location of its
 evidence.
 
+Item 8 is the one entry a measurement accepted rather than rejected. It sits here for the same reason
+as the rest: so that nobody re-derives it, and so that nobody takes more from it than it gives.
+
 1. **The in-place write of `_mask_inplace` brings no throughput gain; every size is INCONCLUSIVE.** 5 densities
    (1% / 5% / 20% / 50% / 95%) × 4 sizes = 20 points, gains **-0.10…+0.00**, same-round A/A floor **1.06–1.56**.
 
@@ -419,6 +422,27 @@ evidence.
    Then `dlopen` both and time the same entry point alternately. This is the exact scenario a consumer hits:
    because the batch entry points are `static inline`, defining `-ffast-math` compiles the header's
    implementation under it.
+
+8. **Fusion — merging several passes into one — is the direction here that measurement accepted, and it is
+   recorded for the same reason: so that nobody re-derives it, and so that nobody takes more from it than it
+   gives.** It wins exactly where the working set exceeds the cache, and the ceiling that comes with it is the
+   part that gets lost.
+
+   Measured: `normalize(a*s + b)` written as three calls costs **80 B/element** (three passes); the fused
+   entry costs **32 B/element** (one pass, including RFO). At n=1M the ratio is **2.43-2.55x**, at n=8M **2.53-2.63x**.
+   Adding NT stores drops the output's RFO as well, reaching **3.53-3.68x** and **3.72-3.78x**.
+
+   **It does not change bit semantics, which is why it needs no new error analysis.** A float store followed
+   by its reload is exact: no intermediate value ever passes through a wider register, so the fused output is
+   `memcmp`-identical to the three-call sequence. The acceptance criterion is therefore "bit-identical to the
+   stepwise calls", and R1 covers it unchanged. `tests/test_madd_norm.cpp` performs exactly that comparison.
+
+   The limit is structural: **only element-wise operations can be fused this way.** Anything carrying a
+   reduction cannot — reordering the evaluation changes the result, which is item 4 above. A "fused `dot`"
+   would be a new algorithm with its own accuracy analysis, not a fusion of two calls.
+
+   Evidence: the contract blocks on `fv_vec2_madd_normalize_soa` and on the integrator group in
+   `include/flashvec.h`, `tests/test_madd_norm.cpp`, and §6 for the 80 → 32 accounting.
 
 **How to use this**: if a new proposal is structurally the same as one of the items above, first say which layer's
 assumption changed — byte accounting, microarchitecture, or semantics. If you cannot say, go back to the five criteria

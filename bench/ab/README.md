@@ -198,6 +198,10 @@ src/ and include/ in the repository are never touched, so there is no "restore a
 * Frequency is not pinned: governor=performance, and 1.5-3.9 GHz is observed, floating with load. **Absolute values are not comparable across sessions**; only ratios within one run mean anything.
 * **Code placement**: the two forms of the same header (defined in the library / inlined in the header) change inlining and alignment by themselves, shifting the L1/L2 tiers by 5-10%.
   This is not "optimization". The criteria turn such one-off factors off by combining two independent builds (verify) with the A/A floor.
+* **A tier's A/A floor is a finite-sample estimate and can come out far too small.** Measured on this machine: n=16777216 produced a floor of 0.3% while that tier's median ratio moved by 1.43%; n=16384 produced 1.9% against a 1.93% deviation, and n=4194304 produced 0.6% against 3.36%.
+  Judging a normal run against such a floor only produces false alarms: two full self-check runs during the English-migration session exited 3 on exactly this, while the checksum gate passed 182/182 in every one of them. A health check that cries wolf trains everyone to ignore it, which is worse than no check.
+  The tier-level check therefore applies **`effective floor = max(tier floor p90, 2%)`** (`AB_MIN_TIER_FLOOR` in `ab_bench.cpp`): below 2% the fixture's own run-to-run reproducibility (measured at 1-2% on the large tiers) dominates the ratio, so "stay inside the floor" is no longer a meaningful demand. The measured floor is what gets printed; the row and the failure banner also show the effective floor, and the banner names the tier(s) that were not judged while stating that the rest of the run stands.
+  This clamp affects **only** the tier-level health check. The per-point criteria (R2/R3/R4) and the all-point median criterion are untouched, so a real regression is still caught by them.
 * The three-dimensional `fv_vec3_*_soa` and four-dimensional `fv_vec4_*_x2` entry points **are not in the registry yet**.
   Their element width is 12 B / 16 B, unlike the 8 B of fv_vec2. The n semantics and allocation of Buf have to change with them; see the "new layout" item in §9.
   The driver itself needs no change, and that is what table-driven buys.
@@ -349,6 +353,7 @@ Measured: 2 of 4 runs exited 3 over that, while **the checksum gate passed 182/1
 2. **n=131072 is excluded from the per-size criterion** (`--tier-exclude=131072`, configurable). It sits on the L3 boundary and its own A/A floor ranges over 0.50–2.22; judging with it amounts to rolling dice.
    It is still measured, still recorded, and **still part of the gate**.
 3. **Backstop**: if a tier's own floor exceeds 20% → that tier is marked INCONCLUSIVE, neither PASS nor FAIL. Because "cannot measure" and "measured a shift" are two different things.
+4. **The floor is clamped from below at 2%** (`AB_MIN_TIER_FLOOR`, `ab_bench.cpp`): a floor estimated from a handful of A/A pairs occasionally lands at 0.3%, and requiring a normal run to stay inside that is a demand the fixture itself cannot meet. Measured evidence is in §8.
 
 ## 10.8 Negative result: `_mask_inplace` has no measurable throughput advantage (5 densities × 4 sizes, all INCONCLUSIVE)
 
@@ -369,6 +374,38 @@ Sparsity only changes how many elements get written, not whether each written el
 **Build the harness first, then optimize**, otherwise this entry point gets written into the contract on the intuition that "it should be faster", and the next person cites it as fact.
 
 The value of a harness is not that it proves an optimization works, but that it **picks out the invalid optimization assumptions before the code is written**.
+
+## 10.9 Any "x times the scalar version" number must name the scalar build tier
+
+The same kernel, the same machine, the same N, two scalar baselines: **2.25x against a
+`-march=native` scalar loop, 1.81x against a scalar loop built at this library's default
+flags** (Ryzen 7 5700U, N=8192; the default-tier figure held 7/7 runs in 1.81-1.84, and at
+N=32768 its median is 1.61 over a 1.41-1.82 range). Nothing about the kernel changed -- only
+the baseline's compiler flags -- so "1.6x" and "2.25x" can both be true of one measurement.
+**A multiplier quoted without its baseline tier is not a result**; the baseline tier alone moves
+the figure by about 40%, which is larger than most of the effects being reported.
+
+The convention in this repository:
+
+* **The scalar baseline is always the library's release default**: `-O3 -fno-math-errno
+  -ffp-contract=off`, **no `-march`** (and no `-mavx2`, `-ffast-math` or `-mfma` either). That is
+  what a consumer who simply links the library gets, so it is the tier the batch entry points
+  actually compete with. `verify/checks.sh` rule [3] enforces it on the real compile commands,
+  and the scalar anchor of this fixture (`ab_scalar_loop.cpp` + `ab_scalar_lib.cpp`) is built with
+  exactly these flags -- which is why the `A/scalar` column of the small-N table is a
+  release-tier number and not a probe number.
+* `-march=native` belongs to the hostile-options fixture (`*_cpp_fma`), never to a baseline.
+* If a number has to be quoted against a differently-built scalar loop, put the tier in the same
+  sentence: "2.25x against a `-march=native` scalar loop (probe tier, not release tier)".
+
+Reproducible evidence: `bench/tfprobe/probe.cpp`. **It is built with `-march=native`**
+(the recorded numbers were taken that way), so the ratios it prints are probe-tier ratios -- the
+2.25x class, not the 1.81x class. Its AVX2 kernels carry `target("avx2")`, so the file also
+compiles without `-march=native`; if you rebuild it that way you are measuring the 1.81x class,
+not reproducing the recorded numbers. The probe is the right tool for "how much headroom does
+this kernel have against an aggressively built scalar loop"; it is the wrong tool for "what does
+a consumer see". Every row also prints its own A/A column (plain loop vs a second plain loop),
+so its noise floor is visible next to the ratio.
 
 ## 11. The five acceptance criteria (verify subcommand)
 

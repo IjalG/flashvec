@@ -1,18 +1,18 @@
 CXX      ?= c++
 CC       ?= cc
 AR       ?= ar
-# 编译选项（P0）：
-#   -O3            解锁 -fno-math-errno 的收益。实测同一段含 sqrtf 的循环，
-#                  -O2 -fno-math-errno 下 GCC 不向量化，-O3 下 "loop vectorized using 16 byte vectors"；
-#                  报告里 len 类循环 x1.25 -> x8.16 的那个数字来自 -O3 配置。
-#   -fno-math-errno 放弃「数学函数失败时设置 errno」。本库的 sqrt 参数恒 >= 0，
-#                  errno 从不被设置；实测数值逐位不变，却让含 sqrtf 的循环可向量化。
-#   -ffp-contract=off 禁止把 a + b*c 收缩成 FMA。逐元素 API 承诺逐位可复现
-#                  （docs/optimization-report.md §4.7），而 FMA 收缩会让同一表达式在不同
-#                  编译单元 / 不同目标下差 1 ulp（本机实测：-ffp-contract=fast 下出现 vfmadd）。
-#   不加 -march=native / -mavx2 / -ffast-math：默认产物保持 x86-64 基线，AVX2 只在
-#   include/flashvec.h 的 static inline 入口里用函数级 target 属性 + 运行时
-#   __builtin_cpu_supports("avx2") != 0 派发启用（实测 32 处派发全在头文件，src/*.cpp 里 0 处）。
+# Compiler flags (P0):
+#   -O3            unlocks the benefit of -fno-math-errno. Measured on the same loop containing sqrtf,
+#                  -O2 -fno-math-errno leaves GCC scalar, -O3 gives "loop vectorized using 16 byte vectors";
+#                  the x1.25 -> x8.16 figure for the len-class loops in the report comes from the -O3 configuration.
+#   -fno-math-errno drops "set errno when a math function fails". This library's sqrt arguments are always >= 0,
+#                  so errno is never set; measured values stay bit-identical, yet loops containing sqrtf become vectorizable.
+#   -ffp-contract=off forbids contracting a + b*c into an FMA. The per-element API promises bit-reproducible
+#                  results (docs/optimization-report.md §4.7), and FMA contraction makes the same expression differ
+#                  by 1 ulp across compilation units / targets (measured here: vfmadd appears under -ffp-contract=fast).
+#   No -march=native / -mavx2 / -ffast-math: the default artifacts keep the x86-64 baseline, and AVX2 is enabled only
+#   inside the static inline entry points of include/flashvec.h, through function-level target attributes plus
+#   runtime __builtin_cpu_supports("avx2") != 0 dispatch (measured: 32 dispatch sites, all in the header, 0 in src/*.cpp).
 CXXFLAGS ?= -std=c++17 -O3 -fno-math-errno -ffp-contract=off -Wall -Wextra -Wpedantic
 CFLAGS   ?= -std=c11 -O3 -fno-math-errno -ffp-contract=off -Wall -Wextra -Wpedantic
 CPPFLAGS ?= -Iinclude
@@ -53,13 +53,13 @@ test: $(BUILD)/test_flashvec $(BUILD)/test_c_api
 clean:
 	rm -rf $(BUILD)
 
-# ---------------- 基准（新增目标，不改动上面任何既有目标的行为） ----------------
-# 基准源码与构建规则都在 bench/ 下；这里只是转发，方便在仓库根目录直接跑：
-#   make bench        编译并跑完四组编译选项 × 三档实现 × 三种规模，原始输出写 docs/research/raw/
-#   make bench-table  由原始日志重新生成 Markdown 对比表
-#   make bench-vec    抓 GCC 自动向量化报告
-#   make bench-asm    生成反汇编归档（bench/build/disasm_*.txt）
-#   make bench-perf   perf stat（需要 kernel.perf_event_paranoid<=1 或有 CAP_PERFMON）
+# ---------------- Benchmarks (new targets; does not change the behaviour of any existing target above) ----------------
+# Benchmark sources and build rules live under bench/; these targets only forward, so they run from the repo root:
+#   make bench        build and run all four flag sets x three implementation tiers x three sizes; raw output goes to docs/research/raw/
+#   make bench-table  regenerate the Markdown comparison table from the raw logs
+#   make bench-vec    capture the GCC auto-vectorization reports
+#   make bench-asm    produce the disassembly archive (bench/build/disasm_*.txt)
+#   make bench-perf   perf stat (needs kernel.perf_event_paranoid<=1 or CAP_PERFMON)
 .PHONY: bench bench-table bench-vec bench-asm bench-perf bench-clean
 
 bench:
@@ -80,10 +80,10 @@ bench-perf:
 bench-clean:
 	$(MAKE) -C bench clean
 
-# ---------------- P0 / P1 测试（只追加，不改动上面 all/test/clean 的任何行为） ----------------
-#   make test-p0     min/max/clamp/madd、AABB、FV_EPS 量纲修正的边界测试
-#   make test-batch  批量入口的位级一致性（memcmp）、掩码语义、索引变体；含一个 C 语言的调用测试
-#   make test-all    上面两个 + 既有 make test（30 条断言 + C 兼容性测试）
+# ---------------- P0 / P1 tests (append-only; does not change the behaviour of all/test/clean above) ----------------
+#   make test-p0     boundary tests for min/max/clamp/madd, AABB, and the FV_EPS dimensional-consistency fix
+#   make test-batch  bit-identical results (memcmp), mask semantics and index variants of the batch entry points; includes a C caller test
+#   make test-all    the two above + the existing make test (30 assertions + the C compatibility test)
 .PHONY: test-p0 test-batch test-all
 
 $(BUILD)/test_p0: tests/test_p0.cpp $(LIB) include/flashvec.h | $(BUILD)
@@ -105,20 +105,23 @@ test-batch: $(BUILD)/test_batch $(BUILD)/test_batch_c
 	./$(BUILD)/test_batch
 	./$(BUILD)/test_batch_c
 
-test-all: test test-p0 test-batch
+test-all: test test-p0 test-batch test-mat4 test-mat4-c test-mat4-inline test-mat4-fma \
+          test-maddnorm test-maddnorm-c test-maddnorm-inline test-maddnorm-fma \
+          test-addmul test-addmul-c test-addmul-inline test-addmul-fma \
+          test-stream test-stream-parity test-stream-parity-fma
 
-# ------------- 头文件 inline 形态（P1 重构）的验收目标（只新增；上面所有目标的命令一字未动） -------------
-#   make test-header          严格编译档（C11 -pedantic-errors / C++17 -Wpedantic）；同一 TU 双重包含；
-#                             编译期断言锁住「x86 + GCC/Clang 的 C TU 必须走 intrinsics 路径」；位级抽查。
-#   make test-inline          默认（inline）形态 vs FV_USE_EXTERN（库内实现）形态的位级对拍：
-#                             同一份 tests/test_parity.c 编五份（语言 × 形态 × 纯 C 回退），主输出流逐字节 cmp。
-#   make test-fma             消费者带 -march=native -mfma -ffp-contract=fast 编译，结果仍必须位级一致
-#                             —— 这是「有收缩风险的入口没被误判成无风险」的唯一保险。
-#                             编译始终执行；运行需要 FMA 硬件（本机有），没有时只编译并打印 SKIP。
-#   make test-inline-effects  消费者默认选项（-O2，不加 -ffp-contract=off）下的内联效果普查：
-#                             第一段 8 个入口必须**完整内联**（n<4 的尾巴循环无 per-element call），
-#                             第二段 5 个入口必须只保留**每批一次** TU 内调用。
-#   make test-refactor        上面全部 + 导出符号清单 + 反汇编普查 + 链接证据。
+# ------------- Acceptance targets for the header-inline form (P1 refactor): append-only; not one command of the targets above was changed -------------
+#   make test-header          strict compile profile (C11 -pedantic-errors / C++17 -Wpedantic); double inclusion in one TU;
+#                             a compile-time assertion pins "a C TU on x86 + GCC/Clang must take the intrinsics path"; bit-level spot checks.
+#   make test-inline          bit-identical cross-check of the default (inline) form against the FV_USE_EXTERN (in-library implementation) form:
+#                             one tests/test_parity.c compiled five ways (language x form x pure-C fallback); the main output stream is compared byte-for-byte.
+#   make test-fma             the consumer compiles with -march=native -mfma -ffp-contract=fast and must still be bit-identical
+#                             -- the only safeguard that "an entry point with contraction risk was not misclassified as risk-free".
+#                             Compilation always runs; execution needs FMA hardware (present here), otherwise it only compiles and prints SKIP.
+#   make test-inline-effects  inlining survey under the consumer's default options (-O2, without -ffp-contract=off):
+#                             the first group of 8 entry points must be **fully inlined** (no per-element call in the n<4 tail loop),
+#                             the second group of 5 entry points must keep exactly **one** in-TU call per batch.
+#   make test-refactor        all of the above + exported-symbol listing + disassembly survey + link evidence.
 .PHONY: test-header test-inline test-fma test-inline-effects test-stream test-refactor
 
 HEADER_CFLAGS   := -std=c11 -pedantic-errors -Wall -Wextra -Wpedantic -Iinclude -O2
@@ -126,8 +129,8 @@ HEADER_CXXFLAGS := -std=c++17 -pedantic-errors -Wall -Wextra -Wpedantic -Iinclud
 PARITY_FLAGS    := -O3 -fno-math-errno -ffp-contract=off -Wall -Wextra -Wpedantic -Iinclude
 FMA_FLAGS       := -O3 -Wall -Wextra -Wpedantic -march=native -mfma -ffp-contract=fast -Iinclude
 
-# 「入口:探针函数」表。第一段 = 无 mul+add 收缩风险（要求完整内联）；
-# 第二段 = 有收缩风险、由 pragma 守着（允许每批一次 TU 内调用，不允许 per-element call）。
+# "entry point : probe function" table. First group = no mul+add contraction risk (full inlining required);
+# second group = contraction risk, guarded by a pragma (one in-TU call per batch allowed, a per-element call is not).
 SAFE_ENTRIES  := fv_vec2_add_x4:probe_add_x4_3 fv_vec2_sub_x4:probe_sub_x4_3 \
                  fv_vec2_scale_x4:probe_scale_x4_3 fv_vec2_add_x4_mask:probe_add_x4_mask_3 \
                  fv_vec2_add_x4_idx:probe_add_x4_idx_3 fv_vec2_scale_x4_idx:probe_scale_x4_idx_3 \
@@ -167,7 +170,7 @@ test-header: $(BUILD)/test_header_c $(BUILD)/test_header_cpp
 	./$(BUILD)/test_header_c
 	./$(BUILD)/test_header_cpp
 
-# 对拍产物：语言（C/C++）× 形态（默认 inline / FV_USE_EXTERN）× 纯 C 回退（-DFV_I_NO_INTRINSICS）
+# Cross-check artifacts: language (C/C++) x form (default inline / FV_USE_EXTERN) x pure-C fallback (-DFV_I_NO_INTRINSICS)
 $(BUILD)/parity_c_inline.o: tests/test_parity.c include/flashvec.h | $(BUILD)
 	$(CC) $(PARITY_FLAGS) -std=c11 -c $< -o $@
 $(BUILD)/parity_cpp_inline.o: tests/test_parity.c include/flashvec.h | $(BUILD)
@@ -189,27 +192,27 @@ test-inline: $(BUILD)/parity_c_inline $(BUILD)/parity_cpp_inline $(BUILD)/parity
 	@for v in c_inline cpp_inline c_extern cpp_extern c_pure; do \
 	  ./$(BUILD)/parity_$$v $(BUILD)/parity_$$v.bin $(BUILD)/parity_$$v.dot.bin || exit 1; \
 	done
-	@echo "== 逐位一致入口的输出流（1486 例：n=0..17 全尾长 + 63；mask 四种模式；idx 重复/逆序/乱序/单元素/m=0；+ P2 的 7 个新入口）=="
+	@echo "== Output streams of the bit-identical entry points (1486 cases: n=0..17 all tail lengths + 63; four mask modes; idx duplicate/reversed/shuffled/single-element/m=0; + the 7 new P2 entry points) =="
 	@cmp $(BUILD)/parity_c_inline.bin $(BUILD)/parity_cpp_inline.bin && echo "  PASS  C inline  == C++ inline"
-	@cmp $(BUILD)/parity_c_inline.bin $(BUILD)/parity_c_extern.bin && echo "  PASS  C inline  == C extern（库内实现）"
-	@cmp $(BUILD)/parity_c_inline.bin $(BUILD)/parity_cpp_extern.bin && echo "  PASS  C inline  == C++ extern（库内实现）"
-	@cmp $(BUILD)/parity_c_inline.bin $(BUILD)/parity_c_pure.bin && echo "  PASS  C inline  == C 纯 C 回退（-DFV_I_NO_INTRINSICS）"
-	@echo "== dot_soa（契约里唯一不保证逐位一致的入口）：四个 AVX2 进程走同一条归约路径 =="
+	@cmp $(BUILD)/parity_c_inline.bin $(BUILD)/parity_c_extern.bin && echo "  PASS  C inline  == C extern (in-library implementation)"
+	@cmp $(BUILD)/parity_c_inline.bin $(BUILD)/parity_cpp_extern.bin && echo "  PASS  C inline  == C++ extern (in-library implementation)"
+	@cmp $(BUILD)/parity_c_inline.bin $(BUILD)/parity_c_pure.bin && echo "  PASS  C inline  == C pure-C fallback (-DFV_I_NO_INTRINSICS)"
+	@echo "== dot_soa (the only entry point the contract does not promise bit-identical results for): all four AVX2 builds take the same reduction path =="
 	@cmp $(BUILD)/parity_cpp_inline.dot.bin $(BUILD)/parity_cpp_extern.dot.bin && echo "  PASS  C++ inline == C++ extern"
 	@cmp $(BUILD)/parity_c_extern.dot.bin $(BUILD)/parity_cpp_extern.dot.bin && echo "  PASS  C extern   == C++ extern"
 	@if cmp -s $(BUILD)/parity_c_pure.dot.bin $(BUILD)/parity_cpp_extern.dot.bin; then \
-	  echo "  NOTE  纯 C 回退的 dot 与 AVX2 相同（本次语料未触发归约顺序差异）"; \
-	else echo "  NOTE  纯 C 回退的 dot 与 AVX2 不同 —— 契约允许（归约顺序不同），故不参与比较"; fi
+	  echo "  NOTE  the pure-C fallback dot equals AVX2 (this corpus did not trigger a reduction-order difference)"; \
+	else echo "  NOTE  the pure-C fallback dot differs from AVX2 -- allowed by the contract (different reduction order), so it takes no part in the comparison"; fi
 
 test-fma: $(BUILD)/parity_cpp_fma $(BUILD)/parity_cpp_extern
 	@if grep -qm1 '^flags.* fma' /proc/cpuinfo 2>/dev/null; then \
 	  ./$(BUILD)/parity_cpp_fma $(BUILD)/parity_cpp_fma.bin $(BUILD)/parity_cpp_fma.dot.bin || exit 1; \
-	  echo "== 消费者带 -march=native -mfma -ffp-contract=fast（最恶劣的真实选项）=="; \
+	  echo "== Consumer built with -march=native -mfma -ffp-contract=fast (the worst real-world options) =="; \
 	  cmp $(BUILD)/parity_cpp_fma.bin $(BUILD)/parity_cpp_extern.bin \
-	    && echo "  PASS  12 个入口仍与库内实现位级一致（pragma 挡住了命令行带来的 FMA）"; \
+	    && echo "  PASS  all 12 entry points are still bit-identical to the in-library implementation (the pragma blocks the FMA the command line brings in)"; \
 	  cmp $(BUILD)/parity_cpp_fma.dot.bin $(BUILD)/parity_cpp_extern.dot.bin \
-	    && echo "  PASS  dot_soa 也一致（两侧走同一条 AVX2 归约路径）"; \
-	else echo "  SKIP: 本机无 FMA，只完成编译"; fi
+	    && echo "  PASS  dot_soa matches too (both sides take the same AVX2 reduction path)"; \
+	else echo "  SKIP: no FMA on this machine, compilation only"; fi
 
 $(BUILD)/consumer_probe_c.o: tests/consumer_probe.c include/flashvec.h | $(BUILD)
 	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Iinclude -c $< -o $@
@@ -220,16 +223,16 @@ $(BUILD)/consumer_probe_cpp.o: tests/consumer_probe.c include/flashvec.h | $(BUI
 test-inline-effects: $(BUILD)/consumer_probe_c.o $(BUILD)/consumer_probe_cpp.o
 	@fail=0; \
 	for obj in $(BUILD)/consumer_probe_c.o $(BUILD)/consumer_probe_cpp.o; do \
-	  echo "== $$obj（-O2，未加 -ffp-contract=off = 消费方默认选项）=="; \
-	  printf '  %-26s %-8s %-8s %-14s %s\n' "入口" "类别" "内联" "调 fv_i_ 次数" "判定"; \
+	  echo "== $$obj (-O2, without -ffp-contract=off = the consumer's default options) =="; \
+	  printf '  %-26s %-8s %-8s %-14s %s\n' "entry" "group" "inline" "fv_i_ calls" "verdict"; \
 	  for spec in $(SAFE_ENTRIES); do \
 	    entry=$$(echo $$spec | cut -d: -f1); probe=$$(echo $$spec | cut -d: -f2); \
 	    impl=$$(echo $$entry | sed -e 's/^fv_vec2_/fv_i_/' -e 's/^fv_vec3_/fv_i_v3_/' -e 's/^fv_vec4_/fv_i_v4_/'); \
 	n=$$(nm --defined-only $$obj | awk '{print $$3}' | grep -cE "^$$impl([.]|$$)" || true); \
 	    c=$$(objdump -d --no-show-raw-insn --disassemble="$$probe" $$obj | grep -cE ':(.*)(call|jmp).*<fv_i_' || true); \
 	    if [ "$$n" = "0" ] && [ "$$c" = "0" ]; then v=PASS; else v=FAIL; fail=1; fi; \
-	    inl=$$(if [ $$n = 0 ]; then echo 是; else echo 否; fi); \
-	    printf '  %-26s %-8s %-8s %-14s %s\n' "$$entry" "第一段" "$$inl" "$$c" "$$v"; \
+	    inl=$$(if [ $$n = 0 ]; then echo yes; else echo no; fi); \
+	    printf '  %-26s %-8s %-8s %-14s %s\n' "$$entry" "group 1" "$$inl" "$$c" "$$v"; \
 	  done; \
 	  for spec in $(RISKY_ENTRIES); do \
 	    entry=$$(echo $$spec | cut -d: -f1); probe=$$(echo $$spec | cut -d: -f2); \
@@ -237,19 +240,19 @@ test-inline-effects: $(BUILD)/consumer_probe_c.o $(BUILD)/consumer_probe_cpp.o
 	n=$$(nm --defined-only $$obj | awk '{print $$3}' | grep -cE "^$$impl([.]|$$)" || true); \
 	    c=$$(objdump -d --no-show-raw-insn --disassemble="$$probe" $$obj | grep -cE ':(.*)(call|jmp).*<fv_i_' || true); \
 	    if [ "$$n" -ge 1 ] && [ "$$c" = "1" ]; then v=PASS; else v=FAIL; fail=1; fi; \
-	    inl=$$(if [ $$n = 0 ]; then echo 是; else echo 否; fi); \
-	    printf '  %-26s %-8s %-8s %-14s %s\n' "$$entry" "第二段" "$$inl" "$$c" "$$v"; \
+	    inl=$$(if [ $$n = 0 ]; then echo yes; else echo no; fi); \
+	    printf '  %-26s %-8s %-8s %-14s %s\n' "$$entry" "group 2" "$$inl" "$$c" "$$v"; \
 	  done; \
 	done; \
 	if objdump -d $(BUILD)/consumer_probe_cpp.o | grep -qE 'jmp.*<fv_i_add_x4>'; then \
-	  echo "  FAIL 仍有 jmp fv_i_add_x4"; fail=1; \
-	else echo "  PASS 消费者 TU 里没有 jmp fv_i_add_x4（n=3 的尾巴已完整内联）"; fi; \
-	echo "  -- probe_add_x4_3 的实际汇编（尾巴逐元素展开，无 call）--"; \
+	  echo "  FAIL jmp fv_i_add_x4 still present"; fail=1; \
+	else echo "  PASS the consumer TU has no jmp fv_i_add_x4 (the n=3 tail is fully inlined)"; fi; \
+	echo "  -- actual assembly of probe_add_x4_3 (tail unrolled element by element, no call) --"; \
 	objdump -d --no-show-raw-insn --disassemble=probe_add_x4_3 $(BUILD)/consumer_probe_cpp.o | tail -n +8 | head -10 | sed 's/^/    /'; \
 	exit $$fail
 
-# P2（内存流量入口）的专项验收：对齐 peel 的四条路径、_mask_inplace 的「不写」语义、sfence 可见性。
-# 位级主对拍在 test_parity.c 里（make test-inline / test-fma 已经覆盖），这里只补它覆盖不到的形态。
+# Dedicated acceptance for P2 (the memory-traffic entry points): the four alignment-peel paths, the "do not write" semantics of _mask_inplace, sfence visibility.
+# The main bit-level cross-check lives in test_parity.c (already covered by make test-inline / test-fma); this only adds the forms it cannot reach.
 $(BUILD)/test_stream.o: tests/test_stream.c include/flashvec.h | $(BUILD)
 	$(CC) -std=c11 -pedantic-errors -Wall -Wextra -Wpedantic -O2 -Iinclude -c $< -o $@
 
@@ -259,39 +262,87 @@ $(BUILD)/test_stream: $(BUILD)/test_stream.o $(LIB)
 test-stream: $(BUILD)/test_stream
 	./$(BUILD)/test_stream
 
+# ---- the 13 _stream (NT store) entry points added for vec2 / vec3 / vec4 / mat4 ----
+#   make test-stream-parity      cross-form bit-level check: the same source is compiled C / C++ x inline / FV_USE_EXTERN,
+#                                plus the pure-C fallback (-DFV_I_NO_INTRINSICS); each form appends every stream output to a
+#                                record file and the five files are cmp-ed, so a form that disagrees (wrong store, wrong peel
+#                                range, an FMA-contracted scalar tail under -ffp-contract=fast) shows up as a byte difference.
+#   make test-stream-parity-fma  the hostile-flags consumer (-march=native -mfma -ffp-contract=fast) cmp-ed against the
+#                                in-library form: the evidence that the pragma still blocks the vfmadd the command line brings in.
+# test-stream itself (the C test above) carries the alignment x tail-length x special-value matrix for those 13 entries.
+.PHONY: test-stream-parity test-stream-parity-fma
+
+$(BUILD)/stream_parity_c_inline.o: tests/test_stream_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -c $< -o $@
+$(BUILD)/stream_parity_cpp_inline.o: tests/test_stream_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(PARITY_FLAGS) -std=c++17 -c $< -o $@
+$(BUILD)/stream_parity_c_extern.o: tests/test_stream_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -DFV_USE_EXTERN -c $< -o $@
+$(BUILD)/stream_parity_cpp_extern.o: tests/test_stream_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(PARITY_FLAGS) -std=c++17 -DFV_USE_EXTERN -c $< -o $@
+$(BUILD)/stream_parity_c_pure.o: tests/test_stream_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -DFV_I_NO_INTRINSICS -c $< -o $@
+$(BUILD)/stream_parity_cpp_fma.o: tests/test_stream_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(FMA_FLAGS) -std=c++17 -c $< -o $@
+
+$(BUILD)/stream_parity_%: $(BUILD)/stream_parity_%.o $(LIB)
+	$(CXX) $^ -o $@
+
+test-stream-parity: $(BUILD)/stream_parity_c_inline $(BUILD)/stream_parity_cpp_inline \
+                    $(BUILD)/stream_parity_c_extern $(BUILD)/stream_parity_cpp_extern \
+                    $(BUILD)/stream_parity_c_pure
+	@for v in c_inline cpp_inline c_extern cpp_extern c_pure; do \
+	  ./$(BUILD)/stream_parity_$$v $(BUILD)/stream_parity_$$v.bin || exit 1; \
+	done
+	@echo "== the 13 new _stream entries: C / C++ x inline / extern + pure-C fallback. Recorded corpus: n=0..40 all tail lengths + 63 + 100 + 1023 + 4097, six output phases, finite values. Edge values (-0.0 / +-inf / NaN / FLT_MIN / FLT_MAX / zero + near-zero vectors) and 12 phases are compared in-process in every form =="
+	@cmp $(BUILD)/stream_parity_c_inline.bin $(BUILD)/stream_parity_cpp_inline.bin && echo "  PASS  C inline  == C++ inline"
+	@cmp $(BUILD)/stream_parity_c_inline.bin $(BUILD)/stream_parity_c_extern.bin && echo "  PASS  C inline  == C extern (in-library implementation)"
+	@cmp $(BUILD)/stream_parity_c_inline.bin $(BUILD)/stream_parity_cpp_extern.bin && echo "  PASS  C inline  == C++ extern (in-library implementation)"
+	@cmp $(BUILD)/stream_parity_c_inline.bin $(BUILD)/stream_parity_c_pure.bin && echo "  PASS  C inline  == C pure-C fallback (-DFV_I_NO_INTRINSICS)"
+
+test-stream-parity-fma: $(BUILD)/stream_parity_cpp_fma $(BUILD)/stream_parity_cpp_extern
+	@if grep -qm1 '^flags.* fma' /proc/cpuinfo 2>/dev/null; then \
+	  ./$(BUILD)/stream_parity_cpp_fma $(BUILD)/stream_parity_cpp_fma.bin || exit 1; \
+	  echo "== the same 13 entries under -march=native -mfma -ffp-contract=fast (the worst real-world options) =="; \
+	  cmp $(BUILD)/stream_parity_cpp_fma.bin $(BUILD)/stream_parity_cpp_extern.bin \
+	    && echo "  PASS  all 13 new entry points are still bit-identical to the in-library implementation (the pragma blocks the FMA the command line brings in)"; \
+	  printf '  vfmadd in the FMA consumer object: %s\n' "$$(objdump -d $(BUILD)/stream_parity_cpp_fma.o | grep -coE 'vfmadd[0-9]*[sp][ds]' || true)"; \
+	else echo "  SKIP: no FMA on this machine, compilation only"; fi
+
 test-refactor: test-header test-inline test-fma test-inline-effects test-stream \
+               test-stream-parity test-stream-parity-fma \
                test-vec4 test-vec34-inline test-vec34-fma
-	@echo "== 导出符号清单（nm -g --defined-only build/libflashvec.a | sort）=="
+	@echo "== Exported symbol list (nm -g --defined-only build/libflashvec.a | sort) =="
 	@nm -g --defined-only $(LIB) | sort
-	@echo "== 反汇编普查：这些模式在库内出现次数必须都是 0 =="
+	@echo "== Disassembly survey: each of these patterns must occur 0 times in the library =="
 	@for pat in 'vfmadd[0-9]*[sp][ds]' 'vfmsub[0-9]*[sp][ds]' 'vfnmadd[0-9]*[sp][ds]' 'vrcpps' 'vrsqrtps' 'haddps' 'vmaskmovps'; do \
 	  printf '  %-22s %s\n' "$$pat" "$$(objdump -d $(LIB) | grep -oE "$$pat" | wc -l)"; \
 	done
-	@echo "== 同样普查消费者产物（C 编译单元现在也带 AVX2，正对照应当非 0）=="
+	@echo "== Same survey over the consumer artifacts (C translation units now carry AVX2 too, so the positive control must be non-zero) =="
 	@for obj in $(BUILD)/parity_c_inline.o $(BUILD)/parity_cpp_inline.o $(BUILD)/parity_c_pure.o; do \
-	  printf '  %-30s vfmadd=%s  AVX(正对照)=%s\n' "$$obj" \
+	  printf '  %-30s vfmadd=%s  AVX(positive control)=%s\n' "$$obj" \
 	    "$$(objdump -d $$obj | grep -oE 'vfmadd[0-9]*[sp][ds]' | wc -l)" \
 	    "$$(objdump -d $$obj | grep -oE 'v(add|sub|mul|div|sqrt)ps' | wc -l)"; \
 	done
-	@echo "== 链接证据：默认形态的可执行文件里没有库内批量符号（inline 展开），extern 形态的从库里来 =="
-	@printf '  parity_c_inline  全局批量符号 = %s\n' "$$(nm -g --defined-only $(BUILD)/parity_c_inline | grep -cE 'fv_vec2_.*_(x4|soa)')"
-	@printf '  parity_c_extern  全局批量符号 = %s\n' "$$(nm -g --defined-only $(BUILD)/parity_c_extern | grep -cE 'fv_vec2_.*_(x4|soa)')"
-# ============ P3：fv_vec4 / fv_vec3 SoA 批量（本段由 vec3/vec4 任务维护） ============
-# 这一段是本轮唯一新增/改动的构建逻辑，说明三件事：
-#   1) fv_vec4 的标量实现（src/flashvec_vec4.cpp）已并入 $(OBJ)：标量 API 与批量入口的标量
-#      尾巴必须同源同选项，符号也必须在 libflashvec.a 里（nm 只增不减）；
-#   2) 位级对拍用 tests/test_vec34_parity.c 编 5 种形态（语言 × 形态 × 纯 C 回退）+ FMA 消费者，
-#      主流程逐字节 cmp；dot 流按契约分组（纯 C 回退的归约顺序不同，允许不同）；
-#   3) 内联效应：P3 的 13 个入口已经加进上面既有的 SAFE_ENTRIES / RISKY_ENTRIES 表，
-#      探针在 tests/consumer_probe.c 的 P3 小节里，所以 make test-inline-effects 直接覆盖它们。
+	@echo "== Link evidence: default-form executables carry no in-library batch symbols (inlined away), the extern form takes them from the library =="
+	@printf '  parity_c_inline  global batch symbols = %s\n' "$$(nm -g --defined-only $(BUILD)/parity_c_inline | grep -cE 'fv_vec2_.*_(x4|soa)')"
+	@printf '  parity_c_extern  global batch symbols = %s\n' "$$(nm -g --defined-only $(BUILD)/parity_c_extern | grep -cE 'fv_vec2_.*_(x4|soa)')"
+# ============ P3: fv_vec4 / fv_vec3 SoA batches (this section is maintained by the vec3/vec4 task) ============
+# This is the only build logic added/changed this round; it states three things:
+#   1) the scalar implementation of fv_vec4 (src/flashvec_vec4.cpp) is now part of $(OBJ): the scalar API and the
+#      scalar tail of the batch entry points must come from the same source with the same options, and the symbols must be in libflashvec.a too (nm only grows);
+#   2) the bit-level cross-check compiles tests/test_vec34_parity.c five ways (language x form x pure-C fallback) + an FMA consumer,
+#      then compares the main stream byte-for-byte; the dot stream is grouped per contract (the pure-C fallback reduces in a different order, so a difference is allowed);
+#   3) inlining effects: the 13 P3 entry points were added to the existing SAFE_ENTRIES / RISKY_ENTRIES tables above,
+#      and the probes live in the P3 subsection of tests/consumer_probe.c, so make test-inline-effects covers them directly.
 .PHONY: test-vec4 test-vec34-inline test-vec34-fma
 
 $(BUILD)/flashvec_vec4.o: src/flashvec_vec4.cpp include/flashvec.h | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
-# 标量 API 的位级参考测试。选项故意与库内实现对齐（-O3 -fno-math-errno -ffp-contract=off）：
-# 参考表达式里的 sqrtf 于是与库里展开成同一条指令，mul+add 也不会收缩 —— 否则比的是编译器
-# 差异，不是库的行为。
+# Bit-level reference test for the scalar API. The options deliberately match the in-library implementation (-O3 -fno-math-errno -ffp-contract=off):
+# the sqrtf in the reference expression then expands to the same instruction as in the library, and mul+add does not contract either --
+# otherwise what gets compared is a compiler difference, not the behaviour of the library.
 $(BUILD)/test_vec4.o: tests/test_vec4.c include/flashvec.h | $(BUILD)
 	$(CC) $(CPPFLAGS) -std=c11 -O3 -fno-math-errno -ffp-contract=off -pedantic-errors -Wall -Wextra -Wpedantic -c $< -o $@
 
@@ -301,7 +352,7 @@ $(BUILD)/test_vec4: $(BUILD)/test_vec4.o $(LIB)
 test-vec4: $(BUILD)/test_vec4
 	./$(BUILD)/test_vec4
 
-# 对拍产物：语言（C/C++）× 形态（默认 inline / FV_USE_EXTERN）× 纯 C 回退 + FMA 消费者
+# Cross-check artifacts: language (C/C++) x form (default inline / FV_USE_EXTERN) x pure-C fallback + FMA consumer
 $(BUILD)/vec34_c_inline.o: tests/test_vec34_parity.c include/flashvec.h | $(BUILD)
 	$(CC) $(PARITY_FLAGS) -std=c11 -c $< -o $@
 $(BUILD)/vec34_cpp_inline.o: tests/test_vec34_parity.c include/flashvec.h | $(BUILD)
@@ -323,35 +374,35 @@ test-vec34-inline: $(BUILD)/vec34_c_inline $(BUILD)/vec34_cpp_inline $(BUILD)/ve
 	@for v in c_inline cpp_inline c_extern cpp_extern c_pure; do \
 	  ./$(BUILD)/vec34_$$v $(BUILD)/vec34_$$v.bin $(BUILD)/vec34_$$v.dot.bin || exit 1; \
 	done
-	@echo "== 三维/四维批量入口：位级一致（n=0..17 全尾长 + 63 + 1024 + 8192；含 GUARD 毒化） =="
+	@echo "== 3D/4D batch entry points: bit-identical (n=0..17 all tail lengths + 63 + 1024 + 8192; with GUARD poisoning) =="
 	@cmp $(BUILD)/vec34_c_inline.bin $(BUILD)/vec34_cpp_inline.bin && echo "  PASS  C inline  == C++ inline"
-	@cmp $(BUILD)/vec34_c_inline.bin $(BUILD)/vec34_c_extern.bin && echo "  PASS  C inline  == C extern（库内实现）"
-	@cmp $(BUILD)/vec34_c_inline.bin $(BUILD)/vec34_cpp_extern.bin && echo "  PASS  C inline  == C++ extern（库内实现）"
-	@cmp $(BUILD)/vec34_c_inline.bin $(BUILD)/vec34_c_pure.bin && echo "  PASS  C inline  == C 纯 C 回退（-DFV_I_NO_INTRINSICS）"
-	@echo "== dot_soa（契约里不保证逐位一致的两个入口）：四个 AVX2 进程走同一条归约路径 =="
+	@cmp $(BUILD)/vec34_c_inline.bin $(BUILD)/vec34_c_extern.bin && echo "  PASS  C inline  == C extern (in-library implementation)"
+	@cmp $(BUILD)/vec34_c_inline.bin $(BUILD)/vec34_cpp_extern.bin && echo "  PASS  C inline  == C++ extern (in-library implementation)"
+	@cmp $(BUILD)/vec34_c_inline.bin $(BUILD)/vec34_c_pure.bin && echo "  PASS  C inline  == C pure-C fallback (-DFV_I_NO_INTRINSICS)"
+	@echo "== dot_soa (the two entry points the contract does not promise bit-identical results for): all four AVX2 builds take the same reduction path =="
 	@cmp $(BUILD)/vec34_cpp_inline.dot.bin $(BUILD)/vec34_cpp_extern.dot.bin && echo "  PASS  C++ inline == C++ extern"
 	@cmp $(BUILD)/vec34_c_extern.dot.bin $(BUILD)/vec34_cpp_extern.dot.bin && echo "  PASS  C extern   == C++ extern"
 	@if cmp -s $(BUILD)/vec34_c_pure.dot.bin $(BUILD)/vec34_cpp_extern.dot.bin; then \
-	  echo "  NOTE  纯 C 回退的 dot 与 AVX2 相同（本次语料未触发归约顺序差异）"; \
-	else echo "  NOTE  纯 C 回退的 dot 与 AVX2 不同 —— 契约允许（归约顺序不同），故不参与比较"; fi
+	  echo "  NOTE  the pure-C fallback dot equals AVX2 (this corpus did not trigger a reduction-order difference)"; \
+	else echo "  NOTE  the pure-C fallback dot differs from AVX2 -- allowed by the contract (different reduction order), so it takes no part in the comparison"; fi
 
 test-vec34-fma: $(BUILD)/vec34_cpp_fma $(BUILD)/vec34_cpp_extern
 	@if grep -qm1 '^flags.* fma' /proc/cpuinfo 2>/dev/null; then \
 	  ./$(BUILD)/vec34_cpp_fma $(BUILD)/vec34_cpp_fma.bin $(BUILD)/vec34_cpp_fma.dot.bin || exit 1; \
-	  echo "== 消费者带 -march=native -mfma -ffp-contract=fast（最恶劣的真实选项）=="; \
+	  echo "== Consumer built with -march=native -mfma -ffp-contract=fast (the worst real-world options) =="; \
 	  cmp $(BUILD)/vec34_cpp_fma.bin $(BUILD)/vec34_cpp_extern.bin \
-	    && echo "  PASS  13 个新入口仍与库内实现位级一致（pragma 挡住了命令行带来的 FMA）"; \
+	    && echo "  PASS  all 13 new entry points are still bit-identical to the in-library implementation (the pragma blocks the FMA the command line brings in)"; \
 	  cmp $(BUILD)/vec34_cpp_fma.dot.bin $(BUILD)/vec34_cpp_extern.dot.bin \
-	    && echo "  PASS  dot_soa 也一致（两侧走同一条 AVX2 归约路径）"; \
-	else echo "  SKIP: 本机无 FMA，只完成编译"; fi
+	    && echo "  PASS  dot_soa matches too (both sides take the same AVX2 reduction path)"; \
+	else echo "  SKIP: no FMA on this machine, compilation only"; fi
 
 # =====================================================================
-# bench/ab 同进程 A/B 夹具的转发目标（只做转发，逻辑全在 bench/ab/）
-#   make bench-ab          自检 + 基线快照（含 A/A 地板表）
-#   make bench-ab-worktree candidate = 当前工作树
-#   make bench-ab-negctl   负对照（候选被改错时必须硬失败并指名函数）
-#   make bench-verify OP=<op> N=<规模>   同向证据五条判定（PASS/FAIL/INCONCLUSIVE）
-# 这些目标只写 bench/ab/build/ 与 docs/research/raw/ab_*，不碰 build/rootbuild/。
+# Forwarding targets for the bench/ab same-process A/B fixture (pure forwarding; all logic lives in bench/ab/)
+#   make bench-ab          self-check + baseline snapshot (including the A/A floor table)
+#   make bench-ab-worktree candidate = the current working tree
+#   make bench-ab-negctl   negative control (a wrongly modified candidate must fail hard and name the function)
+#   make bench-verify OP=<op> N=<size>   the five verdicts of same-direction evidence (PASS/FAIL/INCONCLUSIVE)
+# These targets only write bench/ab/build/ and docs/research/raw/ab_*, never build/rootbuild/.
 # =====================================================================
 .PHONY: bench-ab bench-ab-worktree bench-ab-negctl bench-verify
 
@@ -365,5 +416,219 @@ bench-ab-negctl:
 	$(MAKE) -C bench/ab negctl
 
 bench-verify:
-	@if [ -z "$(OP)" ]; then echo "用法: make bench-verify OP=<op名> [N=<规模>]" >&2; exit 2; fi
+	@if [ -z "$(OP)" ]; then echo "usage: make bench-verify OP=<op-name> [N=<size>]" >&2; exit 2; fi
 	$(MAKE) -C bench/ab verify OP=$(OP) N=$(if $(N),$(N),1048576)
+
+# ==================== P4: matrix point-transform batch entry points (fv_mat4 / fv_mat4_transform_*) ====================
+# Append-only: not one command of any existing target above was changed. The four targets divide the work:
+#   test-mat4          C++ main test: bit-identical cross-check against the scalar reference (n = 0..40 all tail lengths + 1024/4097/8192),
+#                      semantics (identity matrix / translation only / scale only / the w convention / the last row is never read), output sentinels
+#   test-mat4-c        the same set of forms as a C translation unit (declarations, semantics and bits all line up under plain C11)
+#   test-mat4-inline   the output streams of the 5 forms (C/C++ x inline/extern x pure-C fallback) compared byte-for-byte
+#   test-mat4-fma      the consumer compiles with -march=native -mfma -ffp-contract=fast and must still be bit-identical
+#                      -- the matrix kernel has mul+add, so this is the only direct evidence that "the pragma sits in the right place"
+.PHONY: test-mat4 test-mat4-c test-mat4-inline test-mat4-fma
+
+$(BUILD)/test_mat4: tests/test_mat4.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+test-mat4: $(BUILD)/test_mat4
+	./$(BUILD)/test_mat4
+
+$(BUILD)/test_mat4_c.o: tests/test_mat4_c.c include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_mat4_c: $(BUILD)/test_mat4_c.o $(LIB) | $(BUILD)
+	$(CXX) $^ -o $@
+
+test-mat4-c: $(BUILD)/test_mat4_c
+	./$(BUILD)/test_mat4_c
+
+# Cross-check artifacts: language (C/C++) x form (default inline / FV_USE_EXTERN) x pure-C fallback + FMA consumer
+$(BUILD)/mat4_c_inline.o: tests/test_mat4_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -c $< -o $@
+$(BUILD)/mat4_cpp_inline.o: tests/test_mat4_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(PARITY_FLAGS) -std=c++17 -c $< -o $@
+$(BUILD)/mat4_c_extern.o: tests/test_mat4_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -DFV_USE_EXTERN -c $< -o $@
+$(BUILD)/mat4_cpp_extern.o: tests/test_mat4_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(PARITY_FLAGS) -std=c++17 -DFV_USE_EXTERN -c $< -o $@
+$(BUILD)/mat4_c_pure.o: tests/test_mat4_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -DFV_I_NO_INTRINSICS -c $< -o $@
+$(BUILD)/mat4_cpp_fma.o: tests/test_mat4_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(FMA_FLAGS) -std=c++17 -c $< -o $@
+
+$(BUILD)/mat4_%: $(BUILD)/mat4_%.o $(LIB)
+	$(CXX) $^ -o $@
+
+test-mat4-inline: $(BUILD)/mat4_c_inline $(BUILD)/mat4_cpp_inline $(BUILD)/mat4_c_extern \
+                  $(BUILD)/mat4_cpp_extern $(BUILD)/mat4_c_pure
+	@for v in c_inline cpp_inline c_extern cpp_extern c_pure; do \
+	  ./$(BUILD)/mat4_$$v $(BUILD)/mat4_$$v.bin || exit 1; \
+	done
+	@echo "== Matrix point transform: bit-identical (n = 0..40 all tail lengths + 63 + 1024 + 4097; including inf/NaN/-0.0/subnormals) =="
+	@cmp $(BUILD)/mat4_c_inline.bin $(BUILD)/mat4_cpp_inline.bin && echo "  PASS  C inline  == C++ inline"
+	@cmp $(BUILD)/mat4_c_inline.bin $(BUILD)/mat4_c_extern.bin && echo "  PASS  C inline  == C extern (in-library implementation)"
+	@cmp $(BUILD)/mat4_c_inline.bin $(BUILD)/mat4_cpp_extern.bin && echo "  PASS  C inline  == C++ extern (in-library implementation)"
+	@cmp $(BUILD)/mat4_c_inline.bin $(BUILD)/mat4_c_pure.bin && echo "  PASS  C inline  == C pure-C fallback (-DFV_I_NO_INTRINSICS)"
+
+test-mat4-fma: $(BUILD)/mat4_cpp_fma $(BUILD)/mat4_cpp_extern
+	@if grep -qm1 '^flags.* fma' /proc/cpuinfo 2>/dev/null; then \
+	  ./$(BUILD)/mat4_cpp_fma $(BUILD)/mat4_cpp_fma.bin || exit 1; \
+	  echo "== Matrix point transform, consumer built with -march=native -mfma -ffp-contract=fast =="; \
+	  cmp $(BUILD)/mat4_cpp_fma.bin $(BUILD)/mat4_cpp_extern.bin \
+	    && echo "  PASS  both entry points are still bit-identical to the in-library implementation (the AVX2 kernel sits inside the pragma region, no vfmadd)"; \
+	else echo "  SKIP: no FMA on this machine, compilation only"; fi
+
+# ==================== P5: fused pipeline entry (fv_vec2_madd_normalize_soa / _stream) ====================
+# Append-only: not one command of any existing target above was changed. Four targets:
+#   test-maddnorm          C++ main test: bit-identical (memcmp) to fv_vec2_scale_soa -> add_soa -> normalize_soa
+#                          for n = 0..40 (every tail length), n = 1023/4096/4097/8192/12345, an s sweep,
+#                          output/input phase shifts 0..7, path independence, plus a counted anything-goes corpus
+#   test-maddnorm-c        the same criterion from a plain C11 translation unit (declarations and bits line up)
+#   test-maddnorm-inline   the output streams of the 5 forms (C/C++ x inline/extern x pure-C fallback) compared byte for byte
+#   test-maddnorm-fma      the consumer compiles with -march=native -mfma -ffp-contract=fast and must still be bit-identical
+#                          -- the fused kernel computes a * s + b, so this is the direct evidence that it sits inside the
+#                          fp-contract=off pragma; it also counts vfmadd in the two new kernels (must be 0).
+.PHONY: test-maddnorm test-maddnorm-c test-maddnorm-inline test-maddnorm-fma
+
+$(BUILD)/test_madd_norm: tests/test_madd_norm.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+test-maddnorm: $(BUILD)/test_madd_norm
+	./$(BUILD)/test_madd_norm
+
+$(BUILD)/test_madd_norm_c.o: tests/test_madd_norm_c.c include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_madd_norm_c: $(BUILD)/test_madd_norm_c.o $(LIB) | $(BUILD)
+	$(CXX) $^ -o $@
+
+test-maddnorm-c: $(BUILD)/test_madd_norm_c
+	./$(BUILD)/test_madd_norm_c
+
+# Cross-check artifacts: language (C/C++) x form (default inline / FV_USE_EXTERN) x pure-C fallback + FMA consumer
+$(BUILD)/maddnorm_c_inline.o: tests/test_madd_norm_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -c $< -o $@
+$(BUILD)/maddnorm_cpp_inline.o: tests/test_madd_norm_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(PARITY_FLAGS) -std=c++17 -c $< -o $@
+$(BUILD)/maddnorm_c_extern.o: tests/test_madd_norm_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -DFV_USE_EXTERN -c $< -o $@
+$(BUILD)/maddnorm_cpp_extern.o: tests/test_madd_norm_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(PARITY_FLAGS) -std=c++17 -DFV_USE_EXTERN -c $< -o $@
+$(BUILD)/maddnorm_c_pure.o: tests/test_madd_norm_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -DFV_I_NO_INTRINSICS -c $< -o $@
+$(BUILD)/maddnorm_cpp_fma.o: tests/test_madd_norm_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(FMA_FLAGS) -std=c++17 -c $< -o $@
+
+$(BUILD)/maddnorm_%: $(BUILD)/maddnorm_%.o $(LIB)
+	$(CXX) $^ -o $@
+
+test-maddnorm-inline: $(BUILD)/maddnorm_c_inline $(BUILD)/maddnorm_cpp_inline $(BUILD)/maddnorm_c_extern \
+                      $(BUILD)/maddnorm_cpp_extern $(BUILD)/maddnorm_c_pure
+	@for v in c_inline cpp_inline c_extern cpp_extern c_pure; do \
+	  ./$(BUILD)/maddnorm_$$v $(BUILD)/maddnorm_$$v.bin || exit 1; \
+	done
+	@echo "== Fused pipeline out = normalize(a*s + b): bit-identical (n = 0..24 all tail lengths + 63 + 1023 + 4096, s sweep, pointer phases 0/1/3/7) =="
+	@cmp $(BUILD)/maddnorm_c_inline.bin $(BUILD)/maddnorm_cpp_inline.bin && echo "  PASS  C inline  == C++ inline"
+	@cmp $(BUILD)/maddnorm_c_inline.bin $(BUILD)/maddnorm_c_extern.bin && echo "  PASS  C inline  == C extern (in-library implementation)"
+	@cmp $(BUILD)/maddnorm_c_inline.bin $(BUILD)/maddnorm_cpp_extern.bin && echo "  PASS  C inline  == C++ extern (in-library implementation)"
+	@cmp $(BUILD)/maddnorm_c_inline.bin $(BUILD)/maddnorm_c_pure.bin && echo "  PASS  C inline  == C pure-C fallback (-DFV_I_NO_INTRINSICS)"
+
+test-maddnorm-fma: $(BUILD)/maddnorm_cpp_fma $(BUILD)/maddnorm_cpp_extern
+	@if grep -qm1 '^flags.* fma' /proc/cpuinfo 2>/dev/null; then \
+	  ./$(BUILD)/maddnorm_cpp_fma $(BUILD)/maddnorm_cpp_fma.bin || exit 1; \
+	  echo "== Fused pipeline, consumer built with -march=native -mfma -ffp-contract=fast =="; \
+	  cmp $(BUILD)/maddnorm_cpp_fma.bin $(BUILD)/maddnorm_cpp_extern.bin \
+	    && echo "  PASS  both entries are still bit-identical to the in-library implementation (the kernel sits inside the pragma region)"; \
+	  echo "== vfmadd census of that artifact (avx2 symbols first; -march=native inlines them into the wrappers, so the whole object is the fallback criterion) =="; \
+	  printf '  %-40s vfmadd=%s vmovntps=%s\n' "whole object $(BUILD)/maddnorm_cpp_fma.o" \
+	    "$$(objdump -d --no-show-raw-insn $(BUILD)/maddnorm_cpp_fma.o | grep -oE 'vfmadd[0-9]*[sp][ds]' | wc -l)" \
+	    "$$(objdump -d --no-show-raw-insn $(BUILD)/maddnorm_cpp_fma.o | grep -oE 'vmovntps' | wc -l)"; \
+	  for sym in fv_i_madd_norm_soa_avx2 fv_i_madd_norm_stream_soa_avx2 fv_i_madd_norm_soa fv_i_madd_norm_soa_stream; do \
+	    if nm --defined-only $(BUILD)/maddnorm_cpp_fma.o | grep -qE "[[:space:]]$$sym$$"; then \
+	      printf '  %-40s vfmadd=%s vmulps+vaddps=%s\n' "$$sym" \
+	        "$$(objdump -d --no-show-raw-insn --disassemble="$$sym" $(BUILD)/maddnorm_cpp_fma.o | grep -oE 'vfmadd[0-9]*[sp][ds]' | wc -l)" \
+	        "$$(objdump -d --no-show-raw-insn --disassemble="$$sym" $(BUILD)/maddnorm_cpp_fma.o | grep -oE 'v(mul|add)ps' | wc -l)"; \
+	    else printf '  %-40s (inlined into its caller in this artifact)\n' "$$sym"; fi; \
+	  done; \
+	else echo "  SKIP: no FMA on this machine, compilation only"; fi
+
+# ---------------- P4: integrator primitives (in-place x += v*s, vector madd o = a*b + c) ----------------
+#   make test-addmul         bit-level fixture (C++): every tail length n = 0..40, three corpora x eight scales, large and
+#                            non-power-of-two n, NULL/n == 0, alias and alignment phases, split invariance, path
+#                            independence, per-value API vs the written-out expression
+#   make test-addmul-c       the same group from a plain C caller (every tail length n = 0..17, misaligned destination)
+#   make test-addmul-inline  cross-form bit-level parity: C / C++ x inline / FV_USE_EXTERN + the pure-C fallback, byte-compared
+#   make test-addmul-fma     the hostile consumer (-march=native -mfma -ffp-contract=fast): the pragma must still block the
+#                            FMA, plus a vfmadd census of that artifact
+#   make bench-addmul        measurement of addmul / maddv / maddv _stream against the two-pass workaround
+.PHONY: test-addmul test-addmul-c test-addmul-inline test-addmul-fma bench-addmul
+
+$(BUILD)/test_addmul: tests/test_addmul.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+test-addmul: $(BUILD)/test_addmul
+	./$(BUILD)/test_addmul
+
+$(BUILD)/test_addmul_c.o: tests/test_addmul_c.c include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_addmul_c: $(BUILD)/test_addmul_c.o $(LIB) | $(BUILD)
+	$(CXX) $^ -o $@
+
+test-addmul-c: $(BUILD)/test_addmul_c
+	./$(BUILD)/test_addmul_c
+
+# Cross-check artifacts: language (C/C++) x form (default inline / FV_USE_EXTERN) x pure-C fallback + FMA consumer
+$(BUILD)/addmul_c_inline.o: tests/test_addmul_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -c $< -o $@
+$(BUILD)/addmul_cpp_inline.o: tests/test_addmul_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(PARITY_FLAGS) -std=c++17 -c $< -o $@
+$(BUILD)/addmul_c_extern.o: tests/test_addmul_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -DFV_USE_EXTERN -c $< -o $@
+$(BUILD)/addmul_cpp_extern.o: tests/test_addmul_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(PARITY_FLAGS) -std=c++17 -DFV_USE_EXTERN -c $< -o $@
+$(BUILD)/addmul_c_pure.o: tests/test_addmul_parity.c include/flashvec.h | $(BUILD)
+	$(CC) $(PARITY_FLAGS) -std=c11 -DFV_I_NO_INTRINSICS -c $< -o $@
+$(BUILD)/addmul_cpp_fma.o: tests/test_addmul_parity.c include/flashvec.h | $(BUILD)
+	$(CXX) $(FMA_FLAGS) -std=c++17 -c $< -o $@
+
+$(BUILD)/addmul_%: $(BUILD)/addmul_%.o $(LIB)
+	$(CXX) $^ -o $@
+
+test-addmul-inline: $(BUILD)/addmul_c_inline $(BUILD)/addmul_cpp_inline $(BUILD)/addmul_c_extern \
+                    $(BUILD)/addmul_cpp_extern $(BUILD)/addmul_c_pure
+	@for v in c_inline cpp_inline c_extern cpp_extern c_pure; do \
+	  ./$(BUILD)/addmul_$$v $(BUILD)/addmul_$$v.bin || exit 1; \
+	done
+	@echo "== Integrator primitives: bit-identical (n = 0..40 all tail lengths + 63 + 1023 + 4097; four destination phases; finite and single-NaN corpora) =="
+	@cmp $(BUILD)/addmul_c_inline.bin $(BUILD)/addmul_cpp_inline.bin && echo "  PASS  C inline  == C++ inline"
+	@cmp $(BUILD)/addmul_c_inline.bin $(BUILD)/addmul_c_extern.bin && echo "  PASS  C inline  == C extern (in-library implementation)"
+	@cmp $(BUILD)/addmul_c_inline.bin $(BUILD)/addmul_cpp_extern.bin && echo "  PASS  C inline  == C++ extern (in-library implementation)"
+	@cmp $(BUILD)/addmul_c_inline.bin $(BUILD)/addmul_c_pure.bin && echo "  PASS  C inline  == C pure-C fallback (-DFV_I_NO_INTRINSICS)"
+
+test-addmul-fma: $(BUILD)/addmul_cpp_fma $(BUILD)/addmul_cpp_extern
+	@if grep -qm1 '^flags.* fma' /proc/cpuinfo 2>/dev/null; then \
+	  ./$(BUILD)/addmul_cpp_fma $(BUILD)/addmul_cpp_fma.bin || exit 1; \
+	  echo "== Integrator primitives, consumer built with -march=native -mfma -ffp-contract=fast =="; \
+	  cmp $(BUILD)/addmul_cpp_fma.bin $(BUILD)/addmul_cpp_extern.bin \
+	    && echo "  PASS  all six batch entries plus the per-value API are still bit-identical to the in-library implementation (the pragma blocks the FMA)"; \
+	  echo "== vfmadd / vmovntps census of that artifact =="; \
+	  printf '  %-40s vfmadd=%s vmovntps=%s\n' "whole object $(BUILD)/addmul_cpp_fma.o" \
+	    "$$(objdump -d --no-show-raw-insn $(BUILD)/addmul_cpp_fma.o | grep -oE 'vfmadd[0-9]*[sp][ds]' | wc -l)" \
+	    "$$(objdump -d --no-show-raw-insn $(BUILD)/addmul_cpp_fma.o | grep -oE 'vmovntps' | wc -l)"; \
+	  for sym in fv_i_addmul4_avx2 fv_i_addmul_soa_avx2 fv_i_addmul_v3_soa_avx2 fv_i_v4_addmul2_avx2 fv_i_maddv4_avx2 fv_i_maddv4_stream_avx2; do \
+	    if nm --defined-only $(BUILD)/addmul_cpp_fma.o | grep -qE "[[:space:]]$$sym$$"; then \
+	      printf '  %-40s vfmadd=%s vmulps+vaddps=%s\n' "$$sym" \
+	        "$$(objdump -d --no-show-raw-insn --disassemble="$$sym" $(BUILD)/addmul_cpp_fma.o | grep -oE 'vfmadd[0-9]*[sp][ds]' | wc -l)" \
+	        "$$(objdump -d --no-show-raw-insn --disassemble="$$sym" $(BUILD)/addmul_cpp_fma.o | grep -oE 'v(mul|add)ps' | wc -l)"; \
+	    else printf '  %-40s (inlined into its caller in this artifact)\n' "$$sym"; fi; \
+	  done; \
+	else echo "  SKIP: no FMA on this machine, compilation only"; fi
+
+$(BUILD)/bench_addmul: tests/bench_addmul.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+bench-addmul: $(BUILD)/bench_addmul
+	./$(BUILD)/bench_addmul

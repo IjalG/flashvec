@@ -38,10 +38,13 @@ implementation, so nothing needs to be linked. To use the prebuilt library inste
 
 ## Scalar API
 
-Each vector type has 18 functions (`fv_vec3` has one extra, `cross`):
+Each vector type has 18 core functions (`fv_vec3` has one extra, `cross`):
 
 `make` `add` `sub` `neg` `scale` `lerp` `min` `max` `clamp` `madd`
 `dot` `len_sqr` `len` `dist_sqr` `dist` `normalize` `project` `near`
+
+On top of those, all three types have `addmul` (`x + v*s`), and `fv_vec2` alone has `maddv`
+(`a*b + c` with a vector third operand).
 
 The bounding box adds `fv_aabb2_merge` and `fv_aabb2_overlaps`.
 
@@ -50,9 +53,15 @@ header.
 
 ## Batch API
 
-33 entry points, grouped by memory layout. The number in a name is how many elements fit in one
-256-bit register: four `fv_vec2` (`_x4`) or two `fv_vec4` (`_x2`). Both fill the register
-completely, so no lane is wasted.
+52 vector entry points, grouped by memory layout, plus 4 matrix transform entry points. The
+number in a name is how many elements fit in one 256-bit register: four `fv_vec2` (`_x4`) or
+two `fv_vec4` (`_x2`). Both fill the register completely, so no lane is wasted.
+
+19 of the 52 are `_stream` variants of an operation already in the list, differing only in the
+store instruction; see [Streaming stores](#streaming-stores).
+
+The matrix transforms, `fv_mat4_transform_points` and `fv_mat4_transform_dirs`, each with a
+`_stream` form, are documented under [Matrix transform](#matrix-transform) below.
 
 ### AoS (array of structs)
 
@@ -78,6 +87,42 @@ it requires shuffling apart and back together, which gives back the width you sa
 struct would break the ABI and make it 33% larger. So 3D packs eight elements of the *same
 component* into one register, at 100% lane utilization.
 
+### Fused, in-place, three operands
+
+A physics step keeps needing the same three expressions, and writing each one as two library
+calls pays a second pass over memory.
+
+```c
+/* out = normalize(a * s + b) in one pass; bit-identical to scale -> add -> normalize */
+void fv_vec2_madd_normalize_soa(const float* ax, const float* ay,
+                                const float* bx, const float* by,
+                                fv_real s, float* ox, float* oy, size_t n);
+
+/* x += v * s, in place */
+void fv_vec2_addmul_x4 (fv_vec2* x, const fv_vec2* v, fv_real s, size_t n);
+void fv_vec2_addmul_soa(float* x, float* y, const float* vx, const float* vy,
+                        fv_real s, size_t n);
+void fv_vec3_addmul_soa(float* x, float* y, float* z,
+                        const float* vx, const float* vy, const float* vz,
+                        fv_real s, size_t n);
+void fv_vec4_addmul_x2 (fv_vec4* x, const fv_vec4* v, fv_real s, size_t n);
+
+/* o = a * b + c; three vector operands, where madd's third operand is a scalar */
+void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_vec2* o, size_t n);
+```
+
+The per-value forms are `fv_vec2_addmul`, `fv_vec3_addmul`, `fv_vec4_addmul` and
+`fv_vec2_maddv`; every batch entry above is bit-identical to its per-value counterpart.
+
+The in-place write produces no RFO, because the store lands on the cache line the read has just
+brought in. That is why the in-place family is the one with a ceiling above 2x: two passes cost
+56 B/element, in place costs 24 B/element.
+
+`x` is read and written, so `v` must not overlap it. `n == 0` touches no pointer.
+
+The fused pipeline and `maddv` write a separate output, so both have a `_stream` twin. The
+in-place `addmul` group has none on purpose: that store already lands on a line the core owns.
+
 ### Sparse updates
 
 | Function | Semantics |
@@ -92,13 +137,18 @@ roughly 10 cycles per instruction, which does not pay off.
 
 ### Streaming stores
 
-`add_x4_stream` `sub_x4_stream` `scale_x4_stream` `add_soa_stream` `scale_soa_stream`
-`normalize_soa_stream`
+There are 21 `_stream` variants: 19 of the vector entries, plus both matrix transforms. The
+vector ones cover `add` / `sub` / `scale` / `lerp` / `madd` in `_x4` and `_x2` form, the SoA forms
+of `add` / `scale` / `normalize` (and of the fused pipeline) for `fv_vec2`, `add` / `scale` /
+`normalize` for `fv_vec3`, `normalize_soa` for `fv_vec4`, and `maddv_x4`.
 
-These write results with non-temporal stores, bypassing the cache and skipping the read-for-
-ownership traffic. They pay off only when the result is not read back soon and the working set is
-far larger than L3. The library will never switch to them on its own; the choice belongs to the
-caller.
+They write results with non-temporal stores, bypassing the cache and skipping the read-for-
+ownership traffic. **Use them only when the working set is at least L3 — 4 MiB per CCX on this
+machine — and the result is not read back soon.** Below that boundary they are not slightly
+slower but **2–8 times slower**: measured inside L2 at n=8192, the ratio against the ordinary
+store is **0.13–0.37**. Beyond L3 the same round measures **1.48–1.60x**.
+
+The library will never switch to them on its own; the choice belongs to the caller.
 
 ## Guarantees
 
@@ -110,6 +160,8 @@ The following entry points are guaranteed to match the corresponding scalar API 
 - the `_x4`, `_x2`, `_soa`, `_mask` and `_idx` variants of `add`, `sub`, `scale`, `lerp` and `madd`
 - `len_soa`
 - `normalize_soa`
+- the fused pipeline `madd_normalize_soa` against `scale_soa` then `add_soa` then `normalize_soa`
+- `addmul` and `maddv` against their per-value counterparts
 - every `_stream` function against its non-stream counterpart
 
 The implementation uses only `vaddps`, `vsubps`, `vmulps`, `vdivps` and `vsqrtps`. No FMA, no
@@ -150,6 +202,46 @@ handles the rest.
 
 `_x4` and `_soa` require the `__restrict` precondition: inputs and outputs must not overlap.
 
+### Matrix transform
+
+```c
+typedef struct { float m[16]; } fv_mat4;   /* ROW-major: m[row*4 + col] */
+
+fv_mat4 fv_mat4_identity(void);
+
+void fv_mat4_transform_points(const fv_mat4* m, const fv_vec4* in, fv_vec4* out, size_t n);
+void fv_mat4_transform_dirs  (const fv_mat4* m, const fv_vec4* in, fv_vec4* out, size_t n);
+```
+
+`transform_points` treats `in[i].w` as 1, so translation applies. `transform_dirs` treats it as
+0, so translation is ignored and `out[i].w` is 0.
+
+**This is row-major, which is the opposite of GLM and OpenGL.** A GLM matrix must be transposed
+before it goes in.
+
+This is the one entry point where hand-written SIMD actually beats the compiler. The compiler
+does vectorize a plain AoS loop, but it emits 440 instructions with 14 `vpermps`; the hand-written
+kernel is 107 instructions with 3. At L1/L2-resident sizes that is **1.81x over a scalar loop
+compiled at this library's default flags** (7/7 runs in 1.81–1.84 at n=8192), and 2.25x if the
+scalar baseline is compiled with `-march=native` instead. Quote the flags with the number: the
+baseline's compile tier moves the figure by 30%. Above about 131072 elements it converges to 1.0x,
+because at 48 B per element it is DRAM-bound like everything else.
+
+There is no SoA variant. Measured, it would be 1.01x: the compiler already handles SoA perfectly
+(published as `bench/tfprobe/probe.cpp`, which anyone can re-run).
+
+#### The one place bit-identical does not reach
+
+If one arithmetic instruction gets **two NaNs with different payloads**, which NaN survives depends
+on that instruction's operand order. The compiler picks that order, and it picks differently in
+different builds: measured, the same entry point returns different NaN payloads when the caller
+compiles it with `-march=native` than when it links the library build. So the scalar tail, the
+vector kernel, and the same kernel compiled another way can each return a different — all legal —
+NaN bit pattern for one element, meaning a result can change with `n` and with your compiler flags.
+
+Every other input is bit-identical, for every `n` and every tail length. If the corpus contains
+at most one NaN bit pattern, the guarantee holds for those too.
+
 ## Performance
 
 Test machine: AMD Ryzen 7 5700U, 8 cores / 16 threads, AVX2 + FMA, no AVX-512.
@@ -161,6 +253,23 @@ visible in `/sys/devices/system/cpu/cpu0/cache/index3`: `size=4096K`, `shared_cp
 
 At 24 B per element for `add`, the knee is at 4 MiB ÷ 24 B ≈ **1.75e5 live elements**. Measurements
 agree: 2^17 (3 MB working set) runs at 38–57 GB/s, while 2^18 (6 MB) drops to 5.6–8.8 GB/s.
+
+### The machine ceiling
+
+Every figure below is a fraction of what this machine can move, so the ceiling comes first. It is
+`bench/membw.c`, one thread, taskset-pinned, best of 5:
+
+| Working set | triad | triad16 (with RFO) | read | memcpy |
+|---|---|---|---|---|
+| 96 MB | 7.88 GB/s | 10.51 GB/s | 13.28 GB/s | 12.93 GB/s |
+| 48 MB | 9.16 GB/s | 12.21 GB/s | 14.31 GB/s | 14.31 GB/s |
+
+`triad` counts logical bytes, 12 B/element. `triad16` is the same run with the write's
+read-for-ownership allocated in, 16 B/element.
+
+The element-wise baseline: `fv_vec2_add_x4` on a 96 MB working set runs at **3.33 ns/element**,
+about **9.6-10.3 GB/s** against a machine triad16 ceiling of 10.51 GB/s at the same 96 MB working set -- **91-98%** of it. There is no 10x left at
+that size; what is left is the traffic itself.
 
 ### Speedup over scalar calls
 
@@ -203,6 +312,41 @@ On the ceiling: byte accounting gives expected values of 32/24 = 1.333 for the `
 24/16 = 1.500 for `scale` and `normalize`. How many floats an element moves can only be counted per
 entry point. Measured values scatter widely, so a single point exceeding the ceiling by up to 20%
 counts as noise.
+
+### Measurements for the fused and in-place entries
+
+The same harness and conditions: single thread, taskset-pinned, the default tier
+`-O3 -fno-math-errno -ffp-contract=off` **without `-march`**, alternating A/B inside one
+process, the same-round A/A floor beside every row.
+
+| Change | n=8192 | n=1M | n=8M | A/A floor |
+|---|---|---|---|---|
+| `_stream` vs an ordinary store | — | 1.48–1.60x | 1.54–1.60x | 0.97–1.07 |
+| fused `normalize(a*s+b)` vs three calls | 1.73x | 2.43&ndash;2.55x | 2.53&ndash;2.63x | — |
+| the same, plus `_stream` | 1.68x | **3.53–3.68x** | **3.72–3.78x** | — |
+| in-place `x += v*s` vs `scale` then `add` | 1.06–2.18x | 2.05–2.17x | 1.92–2.03x | 0.97–1.06 |
+| `maddv` vs `mul` then `add` | 1.60–1.67x | 1.61–1.79x | 1.59–1.76x | ~1.00 |
+| `maddv_stream` vs `mul` then `add` | 1.16–1.37x | 2.16–2.23x | **2.34–2.41x** | ~1.00 |
+
+The `_stream` row is its own round. The campaign in the previous section read 1.29–1.58x on the
+same two sizes and 0.13–0.51x inside L2, against 1.48–1.60x and 0.13–0.37 here; that is the same
+conclusion within this machine's run-to-run spread.
+
+Three things this table does not say:
+
+- **`_stream` is slower at small sizes, and not slightly: 2–8 times slower** (0.13–0.37 at
+  n=8192). An NT store bypasses the cache, so inside L2 it has no RFO to save and loses the cache
+  hit as well. Use it only when the working set is at least L3, 4 MiB per CCX.
+- **`maddv_stream` at n=8192 is faster relative and slower absolute**: 1.16–1.37x against the
+  two-pass workaround, but 0.99 ns/element against 0.58 for the non-stream form. Inside L2 the
+  non-stream form is the one to call.
+- **The byte account is a ceiling, and 20% above it is noise.** `add` / `sub` / `lerp` /
+  `madd` top out at 32/24 = 1.33x, `scale` / `normalize` / the matrix transform at 1.50x,
+  in-place `addmul` at 2.33x (56/24), `maddv` at 1.60x and `maddv_stream` at 2.00x. Do not
+  claim a measurement is above the theoretical limit on a single point. The `_stream` row reads
+  1.48–1.60x, slightly above the 1.33x ceiling for the `add` family; that excess is real and has
+  a reason — an NT store also keeps the output from polluting the cache, which the byte account
+  does not count.
 
 ### Measurements for `_mask_inplace`
 
@@ -312,7 +456,7 @@ points via SoA, and `fv_vec4` with `_x2` AoS and `_soa` reduction batches.
 
 | Document | Contents |
 |---|---|
-| [`docs/acceptance-protocol.md`](docs/acceptance-protocol.md) | The five acceptance criteria, the A/A floor, and six directions that measurements have already rejected |
+| [`docs/acceptance-protocol.md`](docs/acceptance-protocol.md) | The five acceptance criteria, the A/A floor, and eight directions that measurements have already settled |
 | [`docs/optimization-report.md`](docs/optimization-report.md) | Full optimization analysis with evidence |
 | [`docs/implementation-log.md`](docs/implementation-log.md) | What was landed, in what order, with the acceptance evidence for each step |
 | [`bench/ab/README.md`](bench/ab/README.md) | The same-process A/B harness: how it works and where it lies |

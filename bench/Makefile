@@ -1,12 +1,12 @@
-# bench/Makefile -- flashvec 三档实现基准（新增文件；不改动主 Makefile 的既有目标）
+# bench/Makefile -- flashvec three-implementation benchmark (new file; does not change any existing target of the main Makefile)
 #
-# 用法：
-#   make -C bench run    编译 + 跑全部档位，原始输出写入 ../docs/research/raw/
-#   make -C bench table  从原始日志生成 Markdown 对比表（bench/table.awk）
-#   make -C bench vec    抓 GCC 自动向量化报告（-fopt-info-vec）
-#   make -C bench asm    反汇编归档（看调用开销 / ABI 传参）
-#   make -C bench perf   perf stat 抓 IPC / cache-miss / branch-miss（受 perf_event_paranoid 限制）
-#   make -C bench clean  清掉 bench/build
+# Usage:
+#   make -C bench run    build + run every tier; raw output goes to ../docs/research/raw/
+#   make -C bench table  generate the Markdown comparison table from the raw logs (bench/table.awk)
+#   make -C bench vec    capture the GCC auto-vectorization reports (-fopt-info-vec)
+#   make -C bench asm    disassembly archive (to inspect call overhead / ABI argument passing)
+#   make -C bench perf   perf stat for IPC / cache-miss / branch-miss (limited by perf_event_paranoid)
+#   make -C bench clean  remove bench/build
 
 ROOT   := ..
 BUILD  := build
@@ -19,11 +19,11 @@ CPU    ?= 2
 
 CPPFLAGS += -I$(ROOT)/include
 
-# 三组被测编译选项（-march=native 在本机展开为 AVX2 + FMA，见报告）
+# The three sets of flags under test (-march=native expands to AVX2 + FMA on this machine; see the report)
 NATIVE   := -O3 -march=native
 FFAST    := -O3 -march=native -ffast-math
 SHIPPED  := -O2
-# 只加一个严格语义安全的开关，用来隔离「到底是 fast-math 还是 math-errno 挡住了向量化」
+# Exactly one strictly semantics-safe switch, to isolate "was it fast-math or math-errno that blocked vectorization"
 NOERRNO  := -O3 -march=native -fno-math-errno
 COMMON   := -std=c++17 -Wall -Wextra -Wpedantic
 SIZEFL   := -DFV_N=1048576 -DFV_NMID=65536 -DFV_NSMALL=8192 -DFV_REPS=100 -DFV_REPS_MID=400 -DFV_REPS_SMALL=4000 -DFV_TRIALS=5
@@ -48,7 +48,7 @@ all: $(BINS) $(BIN_MEMBW)
 $(BUILD):
 	mkdir -p $(BUILD)
 
-# 被测库：三组编译选项各编一份，档1 直接链接它们（跨编译单元，不会被内联）
+# Library under test: one object per flag set; tier 1 links them directly (across translation units, so they are not inlined)
 $(LIB_NATIVE): $(ROOT)/src/flashvec.cpp $(ROOT)/include/flashvec.h | $(BUILD)
 	$(CXX) -I$(ROOT)/include $(COMMON) $(NATIVE) -c $< -o $@
 
@@ -61,7 +61,7 @@ $(LIB_SHIPPED): $(ROOT)/src/flashvec.cpp $(ROOT)/include/flashvec.h | $(BUILD)
 $(LIB_NOERRNO): $(ROOT)/src/flashvec.cpp $(ROOT)/include/flashvec.h | $(BUILD)
 	$(CXX) -I$(ROOT)/include $(COMMON) $(NOERRNO) -c $< -o $@
 
-# 精度参考实现：固定严格 IEEE 语义，和被测编译选项无关
+# Accuracy reference implementation: strictly defined IEEE semantics, independent of the flags under test
 $(REF): ref.cpp ref.h | $(BUILD)
 	$(CXX) $(CPPFLAGS) -std=c++17 -O2 -fno-fast-math -ffp-contract=off -fno-tree-vectorize -c $< -o $@
 
@@ -77,7 +77,7 @@ $(BIN_SHIPPED): bench.cpp ref.h $(REF) $(LIB_SHIPPED) | $(BUILD)
 $(BIN_NOERRNO): bench.cpp ref.h $(REF) $(LIB_NOERRNO) | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(COMMON) $(NOERRNO) $(SIZEFL) -DFV_CFG_NAME='"O3_native_nomatherrno"' bench.cpp $(REF) $(LIB_NOERRNO) -o $@
 
-# perf 专用：缩短重复次数，让 perf stat 跑得完
+# perf only: shortened repeat counts so perf stat can finish
 $(BIN_PERF): bench.cpp ref.h $(REF) $(LIB_NATIVE) | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(COMMON) $(NATIVE) -DFV_N=1048576 -DFV_NMID=65536 -DFV_NSMALL=8192 -DFV_REPS=10 -DFV_REPS_MID=50 -DFV_REPS_SMALL=200 -DFV_TRIALS=1 -DFV_CFG_NAME='"perf"' bench.cpp $(REF) $(LIB_NATIVE) -o $@
 
@@ -93,7 +93,7 @@ run: $(BINS) $(BIN_MEMBW)
 	$(BIN_NOERRNO) all $(CPU) | tee $(RAW)/bench_O3_native_nomatherrno.txt
 	@echo "raw logs -> $(RAW)"
 
-# 校验段专用：重复次数压到 1，只为快速拿到 DIFF/IDENT（精度与逐位一致性）证据
+# checks only: repeat counts squeezed to 1, just to get DIFF/IDENT (accuracy and bit-identical) evidence quickly
 $(BUILD)/bench_checks: bench.cpp ref.h $(REF) $(LIB_NATIVE) | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(COMMON) $(NATIVE) -DFV_N=1048576 -DFV_NMID=65536 -DFV_NSMALL=8192 -DFV_REPS=1 -DFV_REPS_MID=1 -DFV_REPS_SMALL=1 -DFV_TRIALS=1 -DFV_CFG_NAME='"checks"' bench.cpp $(REF) $(LIB_NATIVE) -o $@
 
@@ -115,9 +115,9 @@ vec:
 	$(CXX) $(CPPFLAGS) $(COMMON) $(FFAST) $(SIZEFL) -DFV_CFG_NAME='"vecreport"' \
 	  -fopt-info-vec-optimized=$(BUILD)/vec_O3_native_ffastmath.txt \
 	  -fopt-info-vec-missed=$(BUILD)/vecmiss_O3_native_ffastmath.txt -c bench.cpp -o $(BUILD)/bench_vecreport_ffastmath.o
-	@echo "== -O3 -march=native：被向量化的 t1_/t2_ 循环 =="
+	@echo "== -O3 -march=native: vectorized t1_/t2_ loops =="
 	@grep -E '^bench.cpp:[0-9]+:[0-9]+: optimized: loop vectorized' $(BUILD)/vec_O3_native.txt | head -40
-	@echo "== -O3 -march=native -ffast-math：被向量化的 t1_/t2_ 循环 =="
+	@echo "== -O3 -march=native -ffast-math: vectorized t1_/t2_ loops =="
 	@grep -E '^bench.cpp:[0-9]+:[0-9]+: optimized: loop vectorized' $(BUILD)/vec_O3_native_ffastmath.txt | head -40
 
 asm:
@@ -128,8 +128,8 @@ asm:
 	@echo "objdump -> $(BUILD)/disasm_*.txt"
 
 perf: $(BIN_PERF)
-	@echo "# kernel.perf_event_paranoid = $$(cat /proc/sys/kernel/perf_event_paranoid)（>1 时非特权 perf stat 会被拒绝）"
-	@echo "# 放开方式（需 root）：sudo sysctl -w kernel.perf_event_paranoid=1"
+	@echo "# kernel.perf_event_paranoid = $$(cat /proc/sys/kernel/perf_event_paranoid) (unprivileged perf stat is refused when >1)"
+	@echo "# how to relax it (needs root): sudo sysctl -w kernel.perf_event_paranoid=1"
 	taskset -c $(CPU) $(PERF) stat -e cycles,instructions,cache-references,cache-misses,branch-instructions,branch-misses \
 	  $(BIN_PERF) all $(CPU)
 

@@ -36,10 +36,12 @@ fv_vec2_add_x4(pos, vel, pos, N);
 
 ## 标量 API
 
-每个向量类型各有 18 个函数（`fv_vec3` 额外多一个 `cross`）：
+每个向量类型各有 18 个核心函数（`fv_vec3` 额外多一个 `cross`）：
 
 `make` `add` `sub` `neg` `scale` `lerp` `min` `max` `clamp` `madd`
 `dot` `len_sqr` `len` `dist_sqr` `dist` `normalize` `project` `near`
+
+在此之上，三个类型都有 `addmul`（`x + v*s`），只有 `fv_vec2` 有 `maddv`（第三操作数是向量的 `a*b + c`）。
 
 包围盒另有 `fv_aabb2_merge` 和 `fv_aabb2_overlaps`。
 
@@ -47,7 +49,11 @@ fv_vec2_add_x4(pos, vel, pos, N);
 
 ## 批量 API
 
-共 33 个入口，按内存布局分五类。名字里的数字表示一个 256-bit 寄存器装几个元素：`fv_vec2` 装 4 个，叫 `_x4`；`fv_vec4` 装 2 个，叫 `_x2`。两者都能装满，没有 lane 浪费。
+52 个向量入口，按内存布局分组；另有 4 个矩阵变换入口。名字里的数字表示一个 256-bit 寄存器装几个元素：`fv_vec2` 装 4 个，叫 `_x4`；`fv_vec4` 装 2 个，叫 `_x2`。两者都能装满，没有 lane 浪费。
+
+其中 19 个是列表里已有运算的 `_stream` 变体，只有 store 指令不同；见下面「流式写入」一节。
+
+矩阵变换 `fv_mat4_transform_points` 与 `fv_mat4_transform_dirs` 各带一个 `_stream` 形态，见下面的「矩阵变换」一节。
 
 ### AoS 交错
 
@@ -72,6 +78,40 @@ fv_vec2_add_x4(pos, vel, pos, N);
 给结构体加 padding 会破坏 ABI，也让它变大 33%。
 所以三维走「同一分量的 8 个元素装一条寄存器」，lane 利用率 100%。
 
+### 融合、就地、三操作数
+
+物理步进反复需要同样这三个表达式，而每个都写成两次库调用，就多付一趟访存。
+
+```c
+/* out = normalize(a * s + b)，一趟；与 scale → add → normalize 逐位相同 */
+void fv_vec2_madd_normalize_soa(const float* ax, const float* ay,
+                                const float* bx, const float* by,
+                                fv_real s, float* ox, float* oy, size_t n);
+
+/* x += v * s，就地 */
+void fv_vec2_addmul_x4 (fv_vec2* x, const fv_vec2* v, fv_real s, size_t n);
+void fv_vec2_addmul_soa(float* x, float* y, const float* vx, const float* vy,
+                        fv_real s, size_t n);
+void fv_vec3_addmul_soa(float* x, float* y, float* z,
+                        const float* vx, const float* vy, const float* vz,
+                        fv_real s, size_t n);
+void fv_vec4_addmul_x2 (fv_vec4* x, const fv_vec4* v, fv_real s, size_t n);
+
+/* o = a * b + c；三向量操作数，而 madd 的第三参数是标量 */
+void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_vec2* o, size_t n);
+```
+
+对应的逐值形态是 `fv_vec2_addmul`、`fv_vec3_addmul`、`fv_vec4_addmul` 和 `fv_vec2_maddv`；
+上面每个批量入口都与自己的逐值形态逐位相同。
+
+就地写不产生 RFO，因为这次 store 落在刚刚读进来的那条 cache line 上。所以这一族是唯一上限超过 2 倍的：
+两趟 56 B/元素，就地 24 B/元素。
+
+`x` 既读又写，`v` 不得与它重叠。`n == 0` 时不碰任何指针。
+
+融合管线与 `maddv` 都写独立输出，所以两者都有 `_stream` 版本。就地 `addmul` 一族故意没有：
+那次 store 已经落在核自己持有的行上。
+
 ### 稀疏更新
 
 | 函数 | 语义 |
@@ -85,9 +125,15 @@ fv_vec2_add_x4(pos, vel, pos, N);
 
 ### 流式写入
 
-`add_x4_stream` `sub_x4_stream` `scale_x4_stream` `add_soa_stream` `scale_soa_stream` `normalize_soa_stream`
+一共 21 个 `_stream` 变体：19 个向量入口，加两个矩阵变换。向量那边覆盖 `_x4` 与 `_x2` 形态的
+`add` / `sub` / `scale` / `lerp` / `madd`，`fv_vec2` 的 SoA `add` / `scale` / `normalize`（含融合管线），
+`fv_vec3` 的 `add` / `scale` / `normalize`，`fv_vec4` 的 `normalize_soa`，以及 `maddv_x4`。
 
-用非临时存储写出结果，绕过 cache，也省掉 RFO 那一次读。结果不马上被读、且工作集远大于 L3 时才划算。这个选择必须由调用方做，库不会自动切换。
+用非临时存储写出结果，绕过 cache，也省掉 RFO 那一次读。**只在工作集不小于 L3（本机 4 MiB per CCX）、
+且结果不会马上被读回时使用。** 低于这条线时它不是略慢，而是**慢 2–8 倍**：L2 内 n=8192 实测，
+与普通 store 的比值是 **0.13–0.37**。同一轮在 L3 之外读到 **1.48–1.60x**。
+
+这个选择必须由调用方做，库不会自动切换。
 
 ## 语义承诺
 
@@ -98,6 +144,8 @@ fv_vec2_add_x4(pos, vel, pos, N);
 - `add` / `sub` / `scale` / `lerp` / `madd` 的 `_x4`、`_x2`、`_soa`、`_mask`、`_idx` 变体
 - `len_soa`
 - `normalize_soa`
+- 融合管线 `madd_normalize_soa` 与 `scale_soa` → `add_soa` → `normalize_soa` 三次调用
+- `addmul` / `maddv` 与对应逐值形态
 - `_stream` 系列与对应非 stream 版本
 
 实现上只用 `vaddps`、`vsubps`、`vmulps`、`vdivps`、`vsqrtps`，不用 FMA，不用倒数近似，归约顺序与标量一致。
@@ -129,6 +177,31 @@ fv_vec2_add_x4(pos, vel, pos, N);
 
 `_x4` 与 `_soa` 的指针需满足 `__restrict` 前提，输入输出不得重叠。
 
+### 矩阵变换
+
+```c
+typedef struct { float m[16]; } fv_mat4;   /* 行主序：m[row*4 + col] */
+
+fv_mat4 fv_mat4_identity(void);
+
+void fv_mat4_transform_points(const fv_mat4* m, const fv_vec4* in, fv_vec4* out, size_t n);
+void fv_mat4_transform_dirs  (const fv_mat4* m, const fv_vec4* in, fv_vec4* out, size_t n);
+```
+
+`transform_points` 把 `in[i].w` 当 1，平移生效；`transform_dirs` 当 0，平移被忽略，`out[i].w` 为 0。
+
+**这是行主序，与 GLM、OpenGL 相反。** GLM 的矩阵传入前必须先转置。
+
+这是全库唯一一个手写 SIMD 真的赢过编译器的地方。编译器确实会向量化朴素的 AoS 循环，但它生成 440 条指令、14 次 `vpermps`；手写内核是 107 条指令、3 次。在 L1/L2 驻留的规模上，它比**用本库默认编译档编的标量循环**快 **1.81 倍**（n=8192 时 7 次全部落在 1.81–1.84），若把标量基线改用 `-march=native` 编，则是 2.25 倍。引用这个数时请连编译档一起给：基线的编译档能把倍数挪动 30%。超过约 131072 个元素后它收敛到 1.0x，因为每元素 48 字节，和别的运算一样撞 DRAM 墙。
+
+没有 SoA 版本。实测它是 1.01x——编译器已经把 SoA 做到最优（探针在 `bench/tfprobe/probe.cpp`，任何人都能重跑）。
+
+#### 逐位一致唯一够不到的地方
+
+如果某条算术指令的**两个操作数同时是 NaN 且位模式不同**，留下哪一个由这条指令的操作数顺序决定。这个顺序由编译器挑，而它**在不同构建里挑得不一样**：实测同一个入口，调用方用 `-march=native` 编译时与链接库内实现时，会给出不同的 NaN payload。于是标量尾巴、向量内核、以及同一内核换个编法，都可能对同一个元素给出不同（但都合法）的 NaN 位模式——**结果可能随 `n` 和你的编译选项一起变**。
+
+除这一格之外，对所有 `n` 和所有尾长都逐位一致。语料里若最多只有一种 NaN 位模式，这一格也成立。
+
 ## 性能
 
 测试机：AMD Ryzen 7 5700U，8 核 16 线程，AVX2 + FMA，无 AVX-512。
@@ -139,6 +212,20 @@ L3 是 **4 MiB per CCX**，两个 CCX 合计 8 MiB。单线程只能用到自己
 这一点可以从 `/sys/devices/system/cpu/cpu0/cache/index3` 读到：`size=4096K`, `shared_cpu_list=0-7`。
 
 按 `add` 的 24 B/元素算，拐点在 4 MiB ÷ 24 B ≈ **1.75×10⁵ 个活跃元素**。实测吻合：2^17（工作集 3 MB）是 38–57 GB/s，2^18（6 MB）掉到 5.6–8.8 GB/s。
+
+### 机器的上限
+
+下面的数字都是这台机器能搬的量的一个分数，所以先给上限。来自 `bench/membw.c`，单线程、taskset 绑核、5 次取最小：
+
+| 工作集 | triad | triad16（含 RFO） | read | memcpy |
+|---|---|---|---|---|
+| 96 MB | 7.88 GB/s | 10.51 GB/s | 13.28 GB/s | 12.93 GB/s |
+| 48 MB | 9.16 GB/s | 12.21 GB/s | 14.31 GB/s | 14.31 GB/s |
+
+`triad` 按逻辑字节算，12 B/元素。`triad16` 是同一次测量把写那一次的 RFO 也算进去，16 B/元素。
+
+逐元素基线：`fv_vec2_add_x4` 在 96 MB 工作集上是 **3.12–3.33 ns/元素**，约 **9.6–10.3 GB/s**；同工作集下机器 triad16 上限是 10.51 GB/s，即 **91–98%**。
+这个规模上没有 10 倍可拿，剩下的就是流量本身。
 
 ### 相对标量调用的加速比
 
@@ -174,6 +261,33 @@ N = 8192，每数组 32 KB，L2 驻留：
 
 关于上限：字节账给出的期望值，`add` 系是 32/24 = 1.333，`scale` 与 `normalize` 是 24/16 = 1.500。一个元素搬几个 float 只能逐入口算。
 实测值分布较散，单点超过上限 20% 以内都算噪声。
+
+### 融合与就地入口的实测
+
+同一副夹具、同样的条件：单线程、taskset 绑核、默认档 `-O3 -fno-math-errno -ffp-contract=off`（**不带 `-march`**）、
+同进程交替 A/B、每行都配同轮 A/A 地板。
+
+| 项目 | n=8192 | n=1M | n=8M | A/A 地板 |
+|---|---|---|---|---|
+| `_stream` vs 普通 store | — | 1.48–1.60x | 1.54–1.60x | 0.97–1.07 |
+| 融合管线 `normalize(a*s+b)` vs 三次调用 | 1.73x | 2.43–2.55x | 2.53–2.63x | — |
+| 同上，再叠 `_stream` | 1.68x | **3.53–3.68x** | **3.72–3.78x** | — |
+| 就地 `x += v*s` vs `scale` → `add` 两趟 | 1.06–2.18x | 2.05–2.17x | 1.92–2.03x | 0.97–1.06 |
+| `maddv` vs `mul` → `add` | 1.60–1.67x | 1.61–1.79x | 1.59–1.76x | ~1.00 |
+| `maddv_stream` vs `mul` → `add` | 1.16–1.37x | 2.16–2.23x | **2.34–2.41x** | ~1.00 |
+
+`_stream` 那一行来自另一轮。上一节那次 campaign 在同样两档读到 1.29–1.58x、L2 内读到 0.13–0.51x，这里是 1.48–1.60x 与 0.13–0.37；两者在本机跨轮散布之内是同一个结论。
+
+有三件事这张表没说：
+
+- **`_stream` 在小规模上更慢，而且不是略慢：慢 2–8 倍**（n=8192 时 0.13–0.37）。NT store 绕过 cache，
+  在 L2 内既没有 RFO 可省，又失去了缓存命中。只在工作集不小于 L3（4 MiB per CCX）时用它。
+- **`maddv_stream` 在 n=8192 是「相对更快、绝对更慢」**：相对两趟 workaround 是 1.16–1.37x，
+  但绝对耗时 0.99 ns/元素，非 stream 融合版是 0.58。L2 内应该用非 stream 版。
+- **字节账是上限，超过上限 20% 以内属于噪声。** `add` / `sub` / `lerp` / `madd` 的上限是 32/24 = 1.33x，
+  `scale` / `normalize` / 矩阵变换是 1.50x，就地 `addmul` 是 2.33x（56/24），`maddv` 非 stream 1.60x、stream 2.00x。
+  不要凭单点声称「超过理论上限」。`_stream` 那一行读到 1.48–1.60x，略高于 `add` 系的 1.33x 上限；
+  这个超出是真实的，也有原因——NT store 还避免了输出污染 cache，这一层字节账没有计入。
 
 ### `_mask_inplace` 的实测
 
@@ -250,4 +364,4 @@ AVX2 只在头文件里用函数级 `target("avx2")` 属性加运行时 `__built
 
 已经做完、旧版这里写「留给以后」的：三维批量入口（走 SoA）、四维向量（`fv_vec4` 加 `_x2` 与 `_soa` 批量）。见上面的 API 节。
 
-更多分析见 `docs/optimization-report.md`。哪些方向已经实测否决，见 `docs/acceptance-protocol.md` 的 §9。
+更多分析见 `docs/optimization-report.md`。哪些方向已经实测过、结论是什么，见 `docs/acceptance-protocol.md` 的 §9。

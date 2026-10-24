@@ -1,19 +1,22 @@
-/* bench/ab/ab_abi.h —— 变体 TU 与驱动之间的唯一 ABI
+/* bench/ab/ab_abi.h -- the only ABI between the variant TUs and the driver
  *
- * 为什么要有这层：include/flashvec.h 正在被重构成"头文件内联"形态（默认
- * static inline；-DFV_USE_EXTERN 才回到库内定义）。两种形态下批量入口的**链接属性
- * 不同**（内联形态是 TU 私有的 static，库形态是外部符号），因此驱动不可能用
- * "声明 + 函数指针"去调它们。
+ * Why this layer exists: include/flashvec.h is being refactored into a "header-inline"
+ * form (static inline by default; -DFV_USE_EXTERN switches back to library definitions).
+ * The batch entry points have **different linkage** under the two forms (TU-private static
+ * when inlined, external symbols in library form), so the driver cannot call them through
+ * "declaration + function pointer".
  *
- * 解决办法：把计时循环放进每个变体自己的 TU（见 ab_variant.cpp），由它把
- * "一次取样"整段导出。于是：
- *   - 库形态  -> TU 内是跨函数的普通 call（正是链接静态库的调用方拿到的形态）；
- *   - 内联形态 -> TU 内直接被内联（正是重构想要的形态）。
- * 两种形态都能测，且都不需要驱动知道符号名。
+ * The fix: put the timing loop inside each variant's own TU (see ab_variant.cpp) and let it
+ * export one whole "sample" at a time. Hence:
+ *   - library form -> a plain cross-function call inside the TU (exactly what a consumer
+ *                     linking a static library gets);
+ *   - inline form  -> inlined inside the TU (exactly what the refactor wants).
+ * Both forms are measurable, and neither requires the driver to know the symbol names.
  *
- * 本头文件**不包含任何库类型**：指针一律 void * / float * / uint32_t *，A、B 两侧即使
- * 头文件版本不同也不会因为结构体布局不同而读出垃圾。布局一致性另有一道运行期检查
- * （AB_ABI_NAME 导出的 sizeof 指纹）。
+ * This header **includes no library types**: every pointer is void * / float * / uint32_t *,
+ * so A and B cannot read garbage just because the two headers disagree on struct layout.
+ * Layout consistency has its own runtime check (the sizeof fingerprint exported under
+ * AB_ABI_NAME).
  */
 #ifndef AB_ABI_H
 #define AB_ABI_H
@@ -31,15 +34,22 @@ struct AbArgs {
     const uint32_t *idx;
     const float *ax, *ay, *bx, *by;
     float *ox, *oy, *lenv;
-    float *ox2, *oy2;         /* collision 的第二组输出（反射后的速度） */
-    float *px, *py, *qx, *qy; /* 管线 scratch（collision 的输入法线/速度；chain3 的 t/u） */
-    /* 宽元素（vec3 12 B / vec4 16 B）的分量数组；只在这些 op 被选中时非空。
-     * oz/ow 与 vx/vy 同址（base2 的前后两半），两者不会同时使用。 */
+    float *ox2, *oy2;         /* collision: second output set (reflected velocity) */
+    float *px, *py, *qx, *qy; /* pipeline scratch (collision normals/velocity; chain3 t/u) */
+    /* Component arrays for wide elements (vec3 12 B / vec4 16 B); non-null only when
+     * such an op is selected. oz/ow alias vx/vy (the two halves of base2) and are never
+     * used at the same time. */
     const float *az, *bz, *aw, *bw;
     float *oz, *ow;
+    /* Matrix transforms (16 B AoS elements): mat is 16 floats, row-major, last row
+     * (0,0,0,1); vin/vout are AoS arrays of fv_vec4 (one element = 4 floats). */
+    const float *mat;
+    const void *vin;
+    void *vout;
 };
 
-/* op 编号：由 ab_ops.h 的注册表派生（唯一真源）。两侧变体 TU 与驱动共用同一份。 */
+/* op ids: derived from the ab_ops.h registry (single source of truth). The variant TUs
+ * and the driver share the same set. */
 enum {
 #define AB_ABI_ENUM_ITEM(ID, ...) AB_OP_##ID,
     AB_LIB_OPS(AB_ABI_ENUM_ITEM)
@@ -48,17 +58,19 @@ enum {
     AB_OP_COUNT
 };
 
-/* 变体侧向驱动报告"这一个 op 的 store 真的怎么写的"。
- * 驱动用它在 RFO 记账里决定输出数组的真实流量（普通 store = 2x、NT store = 1x）。
- * 这是**运行期**信息，因为同一份 ab_variant.cpp 会被编两次（两侧头文件能力不同）：
- * 例：baseline 头文件没有 _stream 时，thunk 退化成普通 store，这里就必须报 0。 */
+/* The variant side tells the driver how this op's stores are really done.
+ * The driver uses it for RFO accounting of the output array (plain store = 2x, NT store = 1x).
+ * This is **runtime** information because the same ab_variant.cpp is compiled twice (the two
+ * headers differ in capability): e.g. when the baseline header has no _stream, the thunk
+ * degrades to a plain store and this must report 0. */
 #define AB_SIDE_NT 0x1u
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* 每个变体导出三个符号；名字由 -DAB_LOOP_NAME / -DAB_ABI_NAME / -DAB_FLAGS_NAME 指定 */
+/* each variant exports three symbols; the names come from -DAB_LOOP_NAME / -DAB_ABI_NAME /
+ * -DAB_FLAGS_NAME */
 typedef void (*AbLoopFn)(int op, size_t n, long iters, const AbArgs *p, float *dot);
 
 void ab_a_loop(int op, size_t n, long iters, const AbArgs *p, float *dot);

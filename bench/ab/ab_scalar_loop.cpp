@@ -1,11 +1,14 @@
-/* bench/ab/ab_scalar_loop.cpp —— "重构前"锚点：逐元素调标量 API。
+/* bench/ab/ab_scalar_loop.cpp -- the "before the refactor" anchor: element-wise scalar
+ * API calls.
  *
- * 本 TU 只包含头文件，标量函数在别处定义 -> 每次调用都是跨 TU 的普通 call。
- * 这既是 ab_scalar_lib.cpp 存在的原因，也是本夹具最需要守住的一条：
- * 锚点必须比"批量入口"笨，否则量出来的是编译器内联的功劳。
+ * This TU only includes the header; the scalar functions are defined elsewhere, so every
+ * call is an ordinary cross-TU call. That is both why ab_scalar_lib.cpp exists and the one
+ * property this fixture must defend: the anchor has to be dumber than the batch entry
+ * point, otherwise what gets measured is the compiler's inlining.
  *
- * 覆盖范围只做小 N 区制要用的 6 个算子（add/scale/lerp/dot/len/normalize）：
- * 大 N 区制比的是两个批量实现（A/B），标量锚点由 verify/perf.cpp 负责。
+ * Coverage is only the 6 ops the small-N regime needs (add/scale/lerp/dot/len/normalize):
+ * the large-N regime compares two batch implementations (A/B); the scalar anchor is
+ * verify/perf.cpp's job.
  */
 #include "snapshot/include/flashvec.h"
 
@@ -19,7 +22,7 @@ extern "C" unsigned long long ab_s_abi(void)
     return ((unsigned long long)sizeof(fv_vec2) << 32) | (unsigned)sizeof(fv_real);
 }
 
-/* 标量锚点没有 NT store：所有写都是普通 store。 */
+/* the scalar anchor has no NT store: every write is a plain store. */
 extern "C" unsigned ab_s_opflags(int op)
 {
     (void)op;

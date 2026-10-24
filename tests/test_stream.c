@@ -14,6 +14,7 @@
  */
 #include "flashvec.h"
 
+#include <float.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -401,12 +402,400 @@ static void test_sfence_visibility(void)
     }
 }
 
+
+/* ============ the 13 new _stream entries: alignment x tail length x special values ============
+ * Each case compares "stream output" against "non-stream output" over n + 4 elements starting at the shifted output
+ * pointer (both buffers are poisoned first), so a wrong NT body, a missed peel element, an out-of-range tail store or an
+ * overwritten GUARD all show up as a mismatch.
+ * Coverage: n = 0..40 (every tail length of _x4 / _x2 / _soa) + 63/64/65/100/1023/4096/4097/8191;
+ * the output pointer shifts by 0..8, 16, 32 and 64 elements -- 0..7 walk through every 32 B phase of the element stride,
+ * the larger shifts move the allocation itself. Inputs cycle through -0.0f, +-inf, NaN, FLT_MIN/FLT_MAX, denormals,
+ * exact zero vectors (the normalize zero-vector guard) and near-zero vectors. */
+#define N_CAP 8300u
+#define N_GUARD 8u
+
+static fv_vec2 n_v2a[N_CAP + N_GUARD], n_v2b[N_CAP + N_GUARD];
+static fv_vec2 n_v2r[N_CAP + N_GUARD], n_v2s[N_CAP + N_GUARD];
+static fv_vec4 n_v4a[N_CAP + N_GUARD], n_v4b[N_CAP + N_GUARD];
+static fv_vec4 n_v4r[N_CAP + N_GUARD], n_v4s[N_CAP + N_GUARD];
+static float n_ax[N_CAP + N_GUARD], n_ay[N_CAP + N_GUARD], n_az[N_CAP + N_GUARD];
+static float n_aw[N_CAP + N_GUARD], n_bx[N_CAP + N_GUARD], n_by[N_CAP + N_GUARD];
+static float n_bz[N_CAP + N_GUARD], n_bw[N_CAP + N_GUARD];
+static float n_r1[N_CAP + N_GUARD], n_r2[N_CAP + N_GUARD], n_r3[N_CAP + N_GUARD];
+static float n_r4[N_CAP + N_GUARD];
+static float n_s1[N_CAP + N_GUARD], n_s2[N_CAP + N_GUARD], n_s3[N_CAP + N_GUARD];
+static float n_s4[N_CAP + N_GUARD];
+static fv_mat4 n_m;
+
+/* One cycle over the values a vector kernel can mishandle: signed zero, infinities, NaN, the float range extremes,
+ * denormals, exact zeros and near-zeros. */
+static float edge_value(size_t i)
+{
+    static const float kEdge[16] = {
+        0.0f, -0.0f, 1.0f, -1.0f,
+        (float)INFINITY, -(float)INFINITY, (float)NAN, 3.25f,
+        FLT_MIN, -FLT_MIN, FLT_MAX, -FLT_MAX,
+        1.0e-30f, -1.0e-30f, 0.5f, -2.5f
+    };
+    return kEdge[i % 16u];
+}
+
+static void fill_edge(size_t n)
+{
+    size_t i;
+    for (i = 0; i < n + N_GUARD; ++i) {
+        const float ax = edge_value(i);
+        const float ay = (i % 5u == 0u) ? 0.0f : edge_value(i * 3u + 1u);      /* zero vector every 5 */
+        const float az = (i % 7u == 0u) ? 1.0e-30f : edge_value(i * 5u + 2u); /* near-zero every 7 */
+        const float aw = edge_value(i * 7u + 3u);
+        n_v2a[i].x = ax;
+        n_v2a[i].y = ay;
+        n_v2b[i].x = edge_value(i * 11u + 4u);
+        n_v2b[i].y = edge_value(i * 13u + 5u);
+        n_v4a[i].x = ax;
+        n_v4a[i].y = ay;
+        n_v4a[i].z = az;
+        n_v4a[i].w = aw;
+        n_v4b[i].x = edge_value(i * 11u + 4u);
+        n_v4b[i].y = edge_value(i * 13u + 5u);
+        n_v4b[i].z = edge_value(i * 17u + 6u);
+        n_v4b[i].w = edge_value(i * 19u + 7u);
+        n_ax[i] = ax;
+        n_ay[i] = ay;
+        n_az[i] = az;
+        n_aw[i] = aw;
+        n_bx[i] = n_v4b[i].x;
+        n_by[i] = n_v4b[i].y;
+        n_bz[i] = n_v4b[i].z;
+        n_bw[i] = n_v4b[i].w;
+    }
+}
+
+static void set_matrix(void)
+{
+    /* Finite coefficients on purpose: a NaN in the matrix would turn every output into NaN and hide every other difference. */
+    static const float kM[12] = { 1.5f, -0.5f, 0.25f, 7.0f,
+                                  -2.0f, 3.25f, 0.0f, -1.0f,
+                                  1.0e-30f, -0.0f, 0.5f, 2.0f };
+    size_t i;
+    for (i = 0; i < 12u; ++i) {
+        n_m.m[i] = kM[i];
+    }
+    n_m.m[12] = 0.0f;
+    n_m.m[13] = 0.0f;
+    n_m.m[14] = 0.0f;
+    n_m.m[15] = 1.0f;
+}
+
+static void test_new_stream_entries(void)
+{
+    static const size_t kBigLens[] = { 63u, 64u, 65u, 100u, 1023u, 4096u, 4097u, 8191u };
+    static const size_t kOffs[] = { 0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 16u, 32u, 64u };
+    static const float kS[6] = { 0.0f, -0.0f, 1.0f, -3.25f, 1.0e-30f, 0.5f };
+    static const float kT[8] = { 0.0f, -0.0f, 1.0f, 0.5f, -1.0f, 1.0e-30f,
+                                 (float)INFINITY, (float)NAN };
+    size_t lens[64];
+    int nlens = 0;
+    int li;
+    int oi;
+    size_t i;
+
+    for (i = 0; i <= 40u; ++i) {
+        lens[nlens++] = i;
+    }
+    for (i = 0; i < sizeof(kBigLens) / sizeof(kBigLens[0]); ++i) {
+        lens[nlens++] = kBigLens[i];
+    }
+    set_matrix();
+
+    for (li = 0; li < nlens; ++li) {
+        const size_t n = lens[li];
+        fill_edge(n);
+        for (oi = 0; oi < (int)(sizeof(kOffs) / sizeof(kOffs[0])); ++oi) {
+            const size_t off = kOffs[oi];
+            const size_t nbytes2 = (n + 4u) * sizeof(fv_vec2);
+            const size_t nbytes4 = (n + 4u) * sizeof(fv_vec4);
+            const size_t nbytesf = (n + 4u) * sizeof(float);
+            fv_vec2 *const v2r = n_v2r + off;
+            fv_vec2 *const v2s = n_v2s + off;
+            fv_vec4 *const v4r = n_v4r + off;
+            fv_vec4 *const v4s = n_v4s + off;
+            float *const f1r = n_r1 + off;
+            float *const f2r = n_r2 + off;
+            float *const f3r = n_r3 + off;
+            float *const f4r = n_r4 + off;
+            float *const f1s = n_s1 + off;
+            float *const f2s = n_s2 + off;
+            float *const f3s = n_s3 + off;
+            float *const f4s = n_s4 + off;
+            const float s = kS[(size_t)(li + oi) % 6u];
+            const float t = kT[(size_t)(li + oi) % 8u];
+
+            /* ---- vec2 _x4: lerp / madd ---- */
+            poison(n_v2r, sizeof(n_v2r));
+            poison(n_v2s, sizeof(n_v2s));
+            fv_vec2_lerp_x4(n_v2a, n_v2b, t, v2r, n);
+            fv_vec2_lerp_x4_stream(n_v2a, n_v2b, t, v2s, n);
+            CHECK(memcmp(v2r, v2s, nbytes2) == 0, "lerp_x4_stream", n, off);
+
+            poison(n_v2r, sizeof(n_v2r));
+            poison(n_v2s, sizeof(n_v2s));
+            fv_vec2_madd_x4(n_v2a, n_v2b, s, v2r, n);
+            fv_vec2_madd_x4_stream(n_v2a, n_v2b, s, v2s, n);
+            CHECK(memcmp(v2r, v2s, nbytes2) == 0, "madd_x4_stream", n, off);
+
+            /* ---- vec3 SoA: add / scale / normalize ---- */
+            poison(n_r1, sizeof(n_r1));
+            poison(n_r2, sizeof(n_r2));
+            poison(n_r3, sizeof(n_r3));
+            poison(n_s1, sizeof(n_s1));
+            poison(n_s2, sizeof(n_s2));
+            poison(n_s3, sizeof(n_s3));
+            fv_vec3_add_soa(n_ax, n_ay, n_az, n_bx, n_by, n_bz, f1r, f2r, f3r, n);
+            fv_vec3_add_soa_stream(n_ax, n_ay, n_az, n_bx, n_by, n_bz, f1s, f2s, f3s, n);
+            CHECK(memcmp(f1r, f1s, nbytesf) == 0 && memcmp(f2r, f2s, nbytesf) == 0
+                      && memcmp(f3r, f3s, nbytesf) == 0,
+                  "add_soa_stream (vec3)", n, off);
+
+            poison(n_r1, sizeof(n_r1));
+            poison(n_r2, sizeof(n_r2));
+            poison(n_r3, sizeof(n_r3));
+            poison(n_s1, sizeof(n_s1));
+            poison(n_s2, sizeof(n_s2));
+            poison(n_s3, sizeof(n_s3));
+            fv_vec3_scale_soa(n_ax, n_ay, n_az, s, f1r, f2r, f3r, n);
+            fv_vec3_scale_soa_stream(n_ax, n_ay, n_az, s, f1s, f2s, f3s, n);
+            CHECK(memcmp(f1r, f1s, nbytesf) == 0 && memcmp(f2r, f2s, nbytesf) == 0
+                      && memcmp(f3r, f3s, nbytesf) == 0,
+                  "scale_soa_stream (vec3)", n, off);
+
+            poison(n_r1, sizeof(n_r1));
+            poison(n_r2, sizeof(n_r2));
+            poison(n_r3, sizeof(n_r3));
+            poison(n_s1, sizeof(n_s1));
+            poison(n_s2, sizeof(n_s2));
+            poison(n_s3, sizeof(n_s3));
+            fv_vec3_normalize_soa(n_ax, n_ay, n_az, f1r, f2r, f3r, n);
+            fv_vec3_normalize_soa_stream(n_ax, n_ay, n_az, f1s, f2s, f3s, n);
+            CHECK(memcmp(f1r, f1s, nbytesf) == 0 && memcmp(f2r, f2s, nbytesf) == 0
+                      && memcmp(f3r, f3s, nbytesf) == 0,
+                  "normalize_soa_stream (vec3)", n, off);
+
+            /* ---- vec4 _x2: add / sub / scale / lerp / madd ---- */
+            poison(n_v4r, sizeof(n_v4r));
+            poison(n_v4s, sizeof(n_v4s));
+            fv_vec4_add_x2(n_v4a, n_v4b, v4r, n);
+            fv_vec4_add_x2_stream(n_v4a, n_v4b, v4s, n);
+            CHECK(memcmp(v4r, v4s, nbytes4) == 0, "add_x2_stream", n, off);
+
+            poison(n_v4r, sizeof(n_v4r));
+            poison(n_v4s, sizeof(n_v4s));
+            fv_vec4_sub_x2(n_v4a, n_v4b, v4r, n);
+            fv_vec4_sub_x2_stream(n_v4a, n_v4b, v4s, n);
+            CHECK(memcmp(v4r, v4s, nbytes4) == 0, "sub_x2_stream", n, off);
+
+            poison(n_v4r, sizeof(n_v4r));
+            poison(n_v4s, sizeof(n_v4s));
+            fv_vec4_scale_x2(n_v4a, s, v4r, n);
+            fv_vec4_scale_x2_stream(n_v4a, s, v4s, n);
+            CHECK(memcmp(v4r, v4s, nbytes4) == 0, "scale_x2_stream", n, off);
+
+            poison(n_v4r, sizeof(n_v4r));
+            poison(n_v4s, sizeof(n_v4s));
+            fv_vec4_lerp_x2(n_v4a, n_v4b, t, v4r, n);
+            fv_vec4_lerp_x2_stream(n_v4a, n_v4b, t, v4s, n);
+            CHECK(memcmp(v4r, v4s, nbytes4) == 0, "lerp_x2_stream", n, off);
+
+            poison(n_v4r, sizeof(n_v4r));
+            poison(n_v4s, sizeof(n_v4s));
+            fv_vec4_madd_x2(n_v4a, n_v4b, s, v4r, n);
+            fv_vec4_madd_x2_stream(n_v4a, n_v4b, s, v4s, n);
+            CHECK(memcmp(v4r, v4s, nbytes4) == 0, "madd_x2_stream", n, off);
+
+            /* ---- vec4 SoA: normalize ---- */
+            poison(n_r1, sizeof(n_r1));
+            poison(n_r2, sizeof(n_r2));
+            poison(n_r3, sizeof(n_r3));
+            poison(n_r4, sizeof(n_r4));
+            poison(n_s1, sizeof(n_s1));
+            poison(n_s2, sizeof(n_s2));
+            poison(n_s3, sizeof(n_s3));
+            poison(n_s4, sizeof(n_s4));
+            fv_vec4_normalize_soa(n_ax, n_ay, n_az, n_aw, f1r, f2r, f3r, f4r, n);
+            fv_vec4_normalize_soa_stream(n_ax, n_ay, n_az, n_aw, f1s, f2s, f3s, f4s, n);
+            CHECK(memcmp(f1r, f1s, nbytesf) == 0 && memcmp(f2r, f2s, nbytesf) == 0
+                      && memcmp(f3r, f3s, nbytesf) == 0 && memcmp(f4r, f4s, nbytesf) == 0,
+                  "normalize_soa_stream (vec4)", n, off);
+
+            /* ---- mat4 transform: points / dirs ---- */
+            poison(n_v4r, sizeof(n_v4r));
+            poison(n_v4s, sizeof(n_v4s));
+            fv_mat4_transform_points(&n_m, n_v4a, v4r, n);
+            fv_mat4_transform_points_stream(&n_m, n_v4a, v4s, n);
+            CHECK(memcmp(v4r, v4s, nbytes4) == 0, "mat4_transform_points_stream", n, off);
+
+            poison(n_v4r, sizeof(n_v4r));
+            poison(n_v4s, sizeof(n_v4s));
+            fv_mat4_transform_dirs(&n_m, n_v4a, v4r, n);
+            fv_mat4_transform_dirs_stream(&n_m, n_v4a, v4s, n);
+            CHECK(memcmp(v4r, v4s, nbytes4) == 0, "mat4_transform_dirs_stream", n, off);
+        }
+    }
+}
+
+/* Phase combinations the peel cannot fix: the 32 B boundary stays unreachable, so the kernel must fall back to normal
+ * stores for the whole span (bit-identical result, no #GP). Three shapes:
+ *   - fv_vec4 at a 4 B offset (not even 16 B aligned: a 16 B stride cannot remove a 4 B phase);
+ *   - fv_vec2 at a 4 B offset (the same shape tests/test_stream.c already covers for add/sub/scale);
+ *   - three / four SoA outputs whose phases differ by 8 B, so they can never all reach the boundary. */
+static void test_new_stream_fallback_phases(void)
+{
+    static float fa[2u * 520u], fb[2u * 520u], fr[2u * 520u], fs[2u * 520u];
+    static const size_t kFO[3] = { 1u, 2u, 3u };  /* fv_vec4 at a 4 / 8 / 12 B offset: not 16 B aligned */
+    const size_t n = 200u;
+    size_t i;
+    int fi;
+
+    for (i = 0; i < 2u * n; ++i) {
+        fa[i] = edge_value(i);
+        fb[i] = edge_value(i + 3u);
+    }
+    set_matrix();
+
+    for (fi = 0; fi < 3; ++fi) {
+        const size_t fo = kFO[fi];
+        const fv_vec4 *a = (const fv_vec4 *)(const void *)(fa + fo);
+        const fv_vec4 *b = (const fv_vec4 *)(const void *)(fb + fo);
+        fv_vec4 *r = (fv_vec4 *)(void *)(fr + fo);
+        fv_vec4 *o = (fv_vec4 *)(void *)(fs + fo);
+        const size_t bytes = (n + fo) * sizeof(fv_vec4);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_vec4_add_x2(a, b, r, n);
+        fv_vec4_add_x2_stream(a, b, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "add_x2_stream (misaligned fallback)", n, fo);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_vec4_sub_x2(a, b, r, n);
+        fv_vec4_sub_x2_stream(a, b, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "sub_x2_stream (misaligned fallback)", n, fo);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_vec4_scale_x2(a, -3.25f, r, n);
+        fv_vec4_scale_x2_stream(a, -3.25f, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "scale_x2_stream (misaligned fallback)", n, fo);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_vec4_lerp_x2(a, b, 0.5f, r, n);
+        fv_vec4_lerp_x2_stream(a, b, 0.5f, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "lerp_x2_stream (misaligned fallback)", n, fo);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_vec4_madd_x2(a, b, 1.0e-30f, r, n);
+        fv_vec4_madd_x2_stream(a, b, 1.0e-30f, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "madd_x2_stream (misaligned fallback)", n, fo);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_mat4_transform_points(&n_m, a, r, n);
+        fv_mat4_transform_points_stream(&n_m, a, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "mat4_transform_points_stream (misaligned fallback)", n, fo);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_mat4_transform_dirs(&n_m, a, r, n);
+        fv_mat4_transform_dirs_stream(&n_m, a, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "mat4_transform_dirs_stream (misaligned fallback)", n, fo);
+    }
+    {
+        /* fv_vec2 at a 4 B offset (not 8 B aligned): the 32 B boundary is unreachable for an 8 B stride. */
+        const size_t fo = 1u;
+        const fv_vec2 *a = (const fv_vec2 *)(const void *)(fa + fo);
+        const fv_vec2 *b = (const fv_vec2 *)(const void *)(fb + fo);
+        fv_vec2 *r = (fv_vec2 *)(void *)(fr + fo);
+        fv_vec2 *o = (fv_vec2 *)(void *)(fs + fo);
+        const size_t bytes = (n + fo) * sizeof(fv_vec2);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_vec2_lerp_x4(a, b, 0.25f, r, n);
+        fv_vec2_lerp_x4_stream(a, b, 0.25f, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "lerp_x4_stream (misaligned fallback)", n, fo);
+
+        poison(fr, sizeof(fr));
+        poison(fs, sizeof(fs));
+        fv_vec2_madd_x4(a, b, 2.0f, r, n);
+        fv_vec2_madd_x4_stream(a, b, 2.0f, o, n);
+        CHECK(memcmp(fr, fs, bytes) == 0, "madd_x4_stream (misaligned fallback)", n, fo);
+    }
+    {
+        /* ox aligned, oy + 8 B, oz + 16 B (vec3) and additionally ow + 24 B (vec4): no i makes them align together. */
+        static const size_t kLens[] = { 1u, 7u, 8u, 9u, 100u, 4097u };
+        int li;
+        for (li = 0; li < (int)(sizeof(kLens) / sizeof(kLens[0])); ++li) {
+            const size_t n2 = kLens[li];
+            const size_t bytes = (n2 + 1u) * sizeof(float);
+            fill_edge(n2);
+
+            poison(n_r1, sizeof(n_r1));
+            poison(n_r2, sizeof(n_r2));
+            poison(n_r3, sizeof(n_r3));
+            poison(n_s1, sizeof(n_s1));
+            poison(n_s2, sizeof(n_s2));
+            poison(n_s3, sizeof(n_s3));
+            fv_vec3_normalize_soa(n_ax, n_ay, n_az, n_r1, n_r2 + 4, n_r3 + 8, n2);
+            fv_vec3_normalize_soa_stream(n_ax, n_ay, n_az, n_s1, n_s2 + 4, n_s3 + 8, n2);
+            CHECK(memcmp(n_r1, n_s1, bytes) == 0 && memcmp(n_r2, n_s2, bytes) == 0
+                      && memcmp(n_r3, n_s3, bytes) == 0,
+                  "normalize_soa_stream (vec3, mismatched phases)", n2, 4u);
+
+            poison(n_r1, sizeof(n_r1));
+            poison(n_r2, sizeof(n_r2));
+            poison(n_r3, sizeof(n_r3));
+            poison(n_r4, sizeof(n_r4));
+            poison(n_s1, sizeof(n_s1));
+            poison(n_s2, sizeof(n_s2));
+            poison(n_s3, sizeof(n_s3));
+            poison(n_s4, sizeof(n_s4));
+            fv_vec4_normalize_soa(n_ax, n_ay, n_az, n_aw, n_r1, n_r2 + 4, n_r3 + 8, n_r4 + 12, n2);
+            fv_vec4_normalize_soa_stream(n_ax, n_ay, n_az, n_aw, n_s1, n_s2 + 4, n_s3 + 8,
+                                         n_s4 + 12, n2);
+            CHECK(memcmp(n_r1, n_s1, bytes) == 0 && memcmp(n_r2, n_s2, bytes) == 0
+                      && memcmp(n_r3, n_s3, bytes) == 0 && memcmp(n_r4, n_s4, bytes) == 0,
+                  "normalize_soa_stream (vec4, mismatched phases)", n2, 4u);
+        }
+    }
+
+    /* n == 0: the contract says no pointer is read or written, so NULL is legal for every one of the 13 new entries. */
+    fv_vec2_lerp_x4_stream(NULL, NULL, 1.0f, NULL, 0);
+    fv_vec2_madd_x4_stream(NULL, NULL, 1.0f, NULL, 0);
+    fv_vec3_add_soa_stream(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
+    fv_vec3_scale_soa_stream(NULL, NULL, NULL, 1.0f, NULL, NULL, NULL, 0);
+    fv_vec3_normalize_soa_stream(NULL, NULL, NULL, NULL, NULL, NULL, 0);
+    fv_vec4_add_x2_stream(NULL, NULL, NULL, 0);
+    fv_vec4_sub_x2_stream(NULL, NULL, NULL, 0);
+    fv_vec4_scale_x2_stream(NULL, 1.0f, NULL, 0);
+    fv_vec4_lerp_x2_stream(NULL, NULL, 1.0f, NULL, 0);
+    fv_vec4_madd_x2_stream(NULL, NULL, 1.0f, NULL, 0);
+    fv_vec4_normalize_soa_stream(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
+    fv_mat4_transform_points_stream(NULL, NULL, NULL, 0);
+    fv_mat4_transform_dirs_stream(NULL, NULL, NULL, 0);
+    ++g_checks;
+}
+
 int main(void)
 {
     test_stream_peel();
     test_mask_inplace();
     test_mask_nonzero_bytes();
     test_sfence_visibility();
+    test_new_stream_entries();
+    test_new_stream_fallback_phases();
     printf("test_stream: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

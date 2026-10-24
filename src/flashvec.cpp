@@ -1,12 +1,12 @@
-/* flashvec 的实现：C++ 编译，只使用 C 语言子集。 */
+/* Implementation of flashvec: compiled as C++, using only the C language subset. */
 #include "flashvec.h"
 
 #include <math.h>
 
 #if defined(__GNUC__) && !defined(__clang__)
-/* 禁止把 a + b*c 收缩成 FMA。逐元素 API 承诺逐位可复现（docs/optimization-report.md §4.7），
- * 而 FMA 收缩会让同一个表达式在「消费者开了 FMA vs 没开」时差 1 ulp——
- * 批量入口（src/flashvec_batch.cpp）也带同一个 pragma，两边的逐位一致才成立。 */
+/* Forbid contracting a + b*c into an FMA. The per-element API promises bit-exact reproducibility (docs/optimization-report.md §4.7),
+ * and FMA contraction would make the same expression differ by 1 ulp between a consumer with FMA enabled and one without --
+ * the batch entry points (src/flashvec_batch.cpp) carry the same pragma, which is what makes the two sides bit-identical. */
 #pragma GCC optimize ("fp-contract=off")
 #endif
 
@@ -20,7 +20,7 @@ static fv_real fv_abs(fv_real v)
     return v < (fv_real)0 ? -v : v;
 }
 
-/* 逐分量夹取：先比下界再比上界，与头文件写的表达式一致。 */
+/* Per-component clamp: tests the lower bound before the upper one, matching the expression written in the header. */
 static fv_real fv_clamp1(fv_real x, fv_real lo, fv_real hi)
 {
     if (x < lo) {
@@ -32,7 +32,7 @@ static fv_real fv_clamp1(fv_real x, fv_real lo, fv_real hi)
     return x;
 }
 
-/* ---------------- 二维 ---------------- */
+/* ---------------- 2D ---------------- */
 
 fv_vec2 fv_vec2_make(fv_real x, fv_real y)
 {
@@ -131,7 +131,7 @@ fv_vec2 fv_vec2_normalize(fv_vec2 v)
 fv_vec2 fv_vec2_project(fv_vec2 v, fv_vec2 onto)
 {
     fv_real denom = fv_vec2_len_sqr(onto);
-    /* denom 是长度平方，必须用平方量阈值 FV_EPS_SQR（P0 修正：原为线性阈值 FV_EPS）。 */
+    /* denom is a squared length, so the squared threshold FV_EPS_SQR must be used (P0 fix: this used to be the linear threshold FV_EPS). */
     if (fv_abs(denom) <= FV_EPS_SQR) {
         return fv_vec2_make((fv_real)0, (fv_real)0);
     }
@@ -149,7 +149,7 @@ int fv_vec2_near(fv_vec2 a, fv_vec2 b, fv_real eps)
     return 1;
 }
 
-/* ---------------- 三维 ---------------- */
+/* ---------------- 3D ---------------- */
 
 fv_vec3 fv_vec3_make(fv_real x, fv_real y, fv_real z)
 {
@@ -255,7 +255,7 @@ fv_vec3 fv_vec3_normalize(fv_vec3 v)
 fv_vec3 fv_vec3_project(fv_vec3 v, fv_vec3 onto)
 {
     fv_real denom = fv_vec3_len_sqr(onto);
-    /* 同 fv_vec2_project：平方量用平方阈值。 */
+    /* As in fv_vec2_project: a squared quantity takes the squared threshold. */
     if (fv_abs(denom) <= FV_EPS_SQR) {
         return fv_vec3_make((fv_real)0, (fv_real)0, (fv_real)0);
     }
@@ -283,7 +283,7 @@ int fv_vec3_near(fv_vec3 a, fv_vec3 b, fv_real eps)
     return 1;
 }
 
-/* ---------------- 二维包围盒（broad-phase 用） ---------------- */
+/* ---------------- 2D bounding box (for broad-phase) ---------------- */
 
 fv_aabb2 fv_aabb2_merge(fv_aabb2 box, fv_vec2 p)
 {

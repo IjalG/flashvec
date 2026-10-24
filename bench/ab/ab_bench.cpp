@@ -1,46 +1,64 @@
-/* bench/ab/ab_bench.cpp —— flashvec 同进程 A/B（交错）性能 / 吞吐 / 调用开销夹具
+/* bench/ab/ab_bench.cpp -- flashvec in-process A/B (interleaved) performance / throughput /
+ * call-overhead fixture
  *
- * 为什么要有这个文件：README「性能」第 3 条限定说这台机器是共享机、频率会漂移，
- * 同一份代码跨运行可差 20-25%。"跑两个二进制再比"因此不可用：两次运行之间频率、
- * 邻居负载、页映射都变过。站得住的比法是**同一个进程、同一份数据、同一段时间内**
- * 交替跑两个实现（A/B/A/B...），再按档取中位数相除。
+ * Why this file exists: the Performance section of the README (item 3) says this machine is
+ * shared and its clock drifts, so the same code can differ by 20-25% between runs. "Run two
+ * binaries and compare" is therefore unusable: clock, neighbour load and page mappings all
+ * change between the two runs. What does hold is **one process, one data set, one time
+ * window**, with the two implementations interleaved (A/B/A/B...), then a per-tier median
+ * ratio.
  *
- * 三个区制
- *   1) 大 N 吞吐扫描（默认 2^12 … 2^24，8 档）：ns/元素 与 GB/s，配 memcpy/memset/
- *      纯读/triad 上限参考，给出"占同规模 memcpy 吞吐的百分比"；warm 与 cold 都报。
- *   2) 小 N 调用开销区制（n = 4/8/16/32/64）：ns/调用 与 ns/元素 都给，对照组含
- *      scalar_loop（逐元素调标量 API，代表"重构前/链接静态库的调用方"）。
- *   3) 上限参考贯穿两个区制。
+ * Three regimes
+ *   1) large-N throughput sweep (default 2^12 ... 2^24, 8 tiers): ns/element and GB/s against
+ *      memcpy/memset/pure-read/triad ceiling references, plus "percent of memcpy throughput at
+ *      the same size"; both warm and cold are reported.
+ *   2) small-N call-overhead regime (n = 4/8/16/32/64): ns/call and ns/element both, with
+ *      scalar_loop as the control (element-wise scalar API = the pre-refactor / static-library
+ *      consumer).
+ *   3) the ceiling references span both regimes.
  *
- * 结构
- *   baseline  = git HEAD 快照（bench/ab/snapshot/，git show 生成，绝不编工作树 src/）
- *   candidate = 编译期可选：HEAD 快照本身（==baseline，夹具自检）或任意源码树
- *   每个变体各有自己的 TU（ab_variant.cpp，-include 改名宏 + 指定头文件/源文件），
- *   计时循环在变体 TU 内部，因此"库内定义"与"头文件内联"两种形态都能如实测到。
- *   调用只经 ab_X_loop 一个入口，两侧完全对等。
+ * Structure
+ *   baseline  = git HEAD snapshot (bench/ab/snapshot/, produced by git show; the worktree
+ *               src/ is never compiled)
+ *   candidate = chosen at compile time: the HEAD snapshot itself (== baseline, fixture
+ *               self-check) or any source tree
+ *   each variant has its own TU (ab_variant.cpp, -include rename macros plus the chosen
+ *   header/source), so the timing loop lives inside the variant TU and both forms -- library
+ *   definition and header-inline -- are measured as they really are.
+ *   Calls go through the single entry point ab_X_loop, so both sides are perfectly symmetric.
  *
- * 三道语义门禁（任何一道不过都不打印比值/吞吐）
- *   1) 输出与**本文件自带的独立标量参考实现**逐位比较（含掩码写回、idx 未引用位置、
- *      管线中间量）。唯一例外 fv_vec2_dot_soa：头文件明确不承诺逐位一致，按
- *      max(1e-5*|结果|, 1e-6*Σ|逐项积|) 判等——这个界与 n 和语料无关，比裸相对误差稳。
- *   2) A 与 B 的输出也必须逐位相等（例外同上）。
- *   3) 输入缓冲校验和在计时前后不变。
- *   --selfcheck 再加一道：baseline vs baseline 的比值必须落在 [0.85, 1.15]，不落就是
- *   夹具自己不可信，硬失败（退出码 3）。
+ * Three semantic gates (a failing gate suppresses every ratio and every throughput number)
+ *   1) the output is compared bit-for-bit against **this file's own independent scalar
+ *      reference implementation** (including mask write-back, unreferenced idx positions and
+ *      pipeline intermediates). The single exception is fv_vec2_dot_soa, where the header
+ *      explicitly makes no bit-identical promise: it is compared with
+ *      max(1e-5*|result|, 1e-6*sum|term|), a bound independent of n and of the corpus and
+ *      steadier than a bare relative error.
+ *   2) A and B must also agree bit-for-bit (same exception).
+ *   3) the input-buffer checksum must not change across the timed region.
+ *   --selfcheck adds one more: baseline vs baseline ratios must land in [0.85, 1.15];
+ *   otherwise the fixture itself is untrustworthy and fails hard (exit code 3).
  *
- * 测量口径
- *   - 单线程；库无多线程无全局状态。绑核由 Makefile 的 taskset -c 负责（cpu0-7 同一 CCX）。
- *   - N 的量纲是 fv_vec2 元素个数。一个元素在 ax/ay 中各占一个 float。
- *   - B/元素 = 该函数**实际读到 + 写到**的字节数（逐函数人工核对，见 OPS 表与报告）。
- *     GB/s = (rd+wr) / (ns/元素)，即每秒真实移动的字节数（读写都算）。
- *   - warm = 已驻留缓冲区反复跑；cold = 对被测数组 madvise(DONTNEED) 后单次调用
- *     （含 minor page fault；页被内核清零，故 cold 只用于吞吐对照，不参与位级门禁）。
- *     idx 数组永不丢弃——丢了之后所有倒排写都落到下标 0，随机写变热点写。
- *   - 缓存层级按本机实测：L1d 32 KB、L2 512 KB、L3 **4 MB/CCX**（index3=4096K，
- *     shared_cpu_list=0-7；文档里那句"8 MB L3"是错的，一个线程只吃得到自己那 4 MB）。
- *   - 每点最少 5 次取样取中位数，到变异系数 < 5% 或到上限为止，实际次数进 TSV。
+ * Measurement conventions
+ *   - single-threaded; the library has no threads and no global state. Core pinning is the
+ *     Makefile's taskset -c (cpu0-7 share one CCX).
+ *   - N counts fv_vec2 elements. One element occupies one float in ax and one in ay.
+ *   - B/element = the bytes this function **really reads + writes** (checked by hand function
+ *     by function, see the OPS table and the report).
+ *     GB/s = (rd+wr) / (ns/element), i.e. bytes actually moved per second (read and written).
+ *   - warm = the resident buffers are run repeatedly; cold = one call after
+ *     madvise(DONTNEED) on the arrays under test (includes minor page faults; the kernel
+ *     zeroes those pages, so cold only serves throughput comparison and stays out of the
+ *     bit-level gates). The idx array is never dropped -- without it every scattered write
+ *     lands on index 0 and random writes turn into hot writes.
+ *   - cache hierarchy as measured here: L1d 32 KB, L2 512 KB, L3 **4 MB/CCX** (index3=4096K,
+ *     shared_cpu_list=0-7; the "8 MB L3" line in the docs is wrong, a thread only ever sees
+ *     its own 4 MB).
+ *   - at least 5 trials per point, median taken, until the coefficient of variation < 5% or
+ *     the cap is hit; the actual count goes into the TSV.
  *
- * 出口：控制台表格 + TSV（--tsv-out 长表、--matrix-out 矩阵、--small-out 小 N 表）
+ * Output: console tables + TSV (--tsv-out long table, --matrix-out matrix, --small-out small-N
+ * table)
  */
 #include "snapshot/include/flashvec.h"
 
@@ -59,10 +77,12 @@
 
 #include "ab_abi.h"
 
-/* 驱动只 include HEAD 快照的头文件，而 fv_vec4（vec3/vec4 的 P1 新增类型）在 HEAD 里
- * 还不存在。为参考实现补一个同布局的本地定义；布局一致性由变体 TU 的 ABI 指纹与
- * 头文件里的 16 B static_assert 保证（这里再钉一次）。等 HEAD 有了 fv_vec4，
- * Makefile 的自动探测会定义 AB_SNAP_HAS_VEC4=1，这段自动消失。 */
+/* The driver only includes the HEAD snapshot header, and fv_vec4 (the type added with
+ * vec3/vec4 in P1) does not exist there yet. The reference implementations get a local
+ * definition with the same layout; layout consistency is guaranteed by the variant TU's ABI
+ * fingerprint and the 16 B static_assert in the header (and pinned once more here). Once HEAD
+ * has fv_vec4, the Makefile auto-detection defines AB_SNAP_HAS_VEC4=1 and this block
+ * disappears by itself. */
 #ifndef AB_SNAP_HAS_VEC4
 #define AB_SNAP_HAS_VEC4 0
 #endif
@@ -70,7 +90,7 @@
 struct fv_vec4 {
     fv_real x, y, z, w;
 };
-static_assert(sizeof(fv_vec4) == 16, "fv_vec4 必须是 16 B（与头文件契约一致）");
+static_assert(sizeof(fv_vec4) == 16, "fv_vec4 must be 16 B (the header contract)");
 #endif
 
 #ifndef AB_LABEL
@@ -88,18 +108,27 @@ static_assert(sizeof(fv_vec4) == 16, "fv_vec4 必须是 16 B（与头文件契�
 #define AB_L3_BYTES ((size_t)4 * 1024 * 1024)
 #define AB_BAND_LO 0.85
 #define AB_BAND_HI 1.15
-#define AB_ABS_FRAC 1e-6 /* dot_soa 的绝对界：1e-6 * Σ|逐项积| */
-#define AB_REL_FRAC 1e-5 /* dot_soa 的相对界：1e-5 * |结果| */
+/* Lower bound on the A/A floor used by the **tier-level** health check. A tier floor is a
+ * finite-sample estimate (15 ops x a few A/A pairs) and occasionally comes out absurdly small:
+ * 0.3% was measured on n=16777216. The fixture's own run-to-run reproducibility on the large
+ * tiers is 1-2%, so below that "stay within the floor" stops being a meaningful demand and
+ * flags perfectly normal runs. The clamp applies to this tier-level check only -- R2/R3/R4 and
+ * the all-point median criterion are untouched. See README section 8 (known limitations). */
+#define AB_MIN_TIER_FLOOR 0.02
+#define AB_ABS_FRAC 1e-6 /* dot_soa absolute bound: 1e-6 * sum|term| */
+#define AB_REL_FRAC 1e-5 /* dot_soa relative bound: 1e-5 * |result| */
 #define AB_T 0.375f
 #define AB_S (-0.25f)
 
 /* =====================================================================
- * 一、环境探针
+ * 1. Environment probes
  * ===================================================================== */
-/* 计时基准。默认用**本线程 CPU 时间**而不是墙钟：这台机器长期被别的负载占 30-50%，
- * 墙钟会把"被调度走了多久"算进被测代码，在 DRAM 档上能占到 20% 以上。
- * CPU 时间只统计本线程真正在核上跑的时长——它仍然包含被邻居抢 L3 造成的停顿（那是真实
- * 影响），但不包含被抢占的时间。--clock=mono 可以切回墙钟自己核对差值。 */
+/* The clock. Default is **this thread's CPU time**, not the wall clock: foreign load keeps
+ * 30-50% of this machine busy, and wall time charges the code under test for every second it
+ * was descheduled -- more than 20% at the DRAM tiers. CPU time counts only the time this
+ * thread really spent on a core; it still includes stalls from neighbours stealing L3 (a real
+ * effect) but not the time we were preempted. --clock=mono switches back to the wall clock so
+ * the difference can be checked by hand. */
 static clockid_t g_clock = CLOCK_THREAD_CPUTIME_ID;
 static const char *g_clock_name = "cpu(CLOCK_THREAD_CPUTIME_ID)";
 
@@ -216,35 +245,40 @@ static void *xalloc(size_t bytes)
     void *p = nullptr;
     const size_t b = (bytes + 63u) & ~(size_t)63u;
     if (posix_memalign(&p, 64, b ? b : 64) != 0 || !p) {
-        std::fprintf(stderr, "分配失败: %zu 字节\n", bytes);
+        std::fprintf(stderr, "allocation failed: %zu bytes\n", bytes);
         std::exit(2);
     }
     return p;
 }
 
 /* =====================================================================
- * 二、缓冲区与数据
+ * 2. Buffers and data
  * ===================================================================== */
-/* 输出形态。KIND 同时决定**元素宽度**（见 elem_bytes）：VEC2/SOA2/SOA4/FLOAT/NONE
- * 的元素是 fv_vec2（8 B），SOA3 是 12 B（fv_vec3），VEC4/SOA4V 是 16 B（fv_vec4）。
- * 同一档扫描里所有 op 处理**相同的字节量**：元素数 = 扫描规模 n(8B 单位) * 8 / elem_bytes，
- * 于是 vec4 与 vec2 的比值天然是按字节归一的对照。 */
-enum OutKind { OUT_VEC2, OUT_SOA2, OUT_SOA3, OUT_SOA4, OUT_SOA4V, OUT_VEC4, OUT_FLOAT, OUT_NONE };
+/* Output form. KIND also fixes the **element width** (see elem_bytes): VEC2/SOA2/SOA4/FLOAT/
+ * NONE elements are fv_vec2 (8 B), SOA3 is 12 B (fv_vec3) and VEC4/SOA4V is 16 B (fv_vec4).
+ * Within one tier every op moves **the same number of bytes**: element count = sweep size
+ * n (in 8 B units) * 8 / elem_bytes, so a vec4 vs vec2 ratio is a byte-normalized comparison
+ * by construction. */
+/* VEC4M is VEC4 plus a matrix operand: the driver then allocates a 16 B AoS input array and
+ * the 16-float matrix, and keeps az/bz/aw/bw (SoA-only) out of the allocation. */
+enum OutKind { OUT_VEC2, OUT_SOA2, OUT_SOA3, OUT_SOA4, OUT_SOA4V, OUT_VEC4, OUT_VEC4M,
+               OUT_FLOAT, OUT_NONE };
 
-/* 元素宽度不再从 KIND 推导：归约型 op（dot/len）的输出是 float/NONE，但元素宽度
- * 仍可能是 12/16 B。宽度是 op 的身份，写在注册表每一行的 ELOP 列里。 */
+/* Element width is no longer derived from KIND: a reduction op (dot/len) writes a float/NONE
+ * yet its elements can still be 12/16 B. Width is part of the op's identity and lives in the
+ * ELOP column of every registry row. */
 enum Policy { POL_EXACT, POL_REL, POL_NOCHECK };
 enum Side { SIDE_A = 0, SIDE_B = 1, SIDE_S = 2 };
 
 struct OutSet {
-    void *base;  /* 8n：o / ox,oy / lenv 共用（同一时刻只用一种形状） */
-    void *base2; /* 8n：collision 的 (vox,voy) | vec3 的 oz | vec4 的 oz,ow */
+    void *base;  /* 8n: shared by o / ox,oy / lenv (only one form is live at a time) */
+    void *base2; /* 8n: collision (vox,voy) | vec3 oz | vec4 oz,ow */
     fv_vec2 *o;
     float *ox, *oy, *lenv;
-    float *vx, *vy;    /* = base2 的前后两半，供 collision 用 */
-    float *oz, *ow;    /* = base2 的前后两半，供 vec3/vec4 SoA 用（与 vx/vy 同址） */
+    float *vx, *vy;    /* the two halves of base2, used by collision */
+    float *oz, *ow;    /* the two halves of base2 for vec3/vec4 SoA (alias vx/vy) */
     float dot;
-    double abs_sum; /* dot_soa 参考实现的 Σ|逐项积|，用于绝对容差 */
+    double abs_sum; /* sum|term| from the dot_soa reference, feeds the absolute tolerance */
 };
 
 struct Buf {
@@ -255,14 +289,20 @@ struct Buf {
     uint32_t *idx;
     float *ax, *ay, *bx, *by;
     float *px, *py, *qx, *qy;
-    /* 宽元素（vec3 12 B / vec4 16 B）专用的分量数组：只有选中宽 op 时才分配，
-     * 默认扫描（全是 vec2）一个字节都不多花。 */
+    /* Component arrays for wide elements (vec3 12 B / vec4 16 B): allocated only when a wide
+     * op is selected, so the default sweep (all vec2) costs not a single extra byte. */
     float *az, *bz, *aw, *bw;
+    /* Matrix transforms: 16 B AoS input (one fv_vec4 = 4 floats) plus the 16-float matrix,
+     * row-major with its last row (0,0,0,1). Allocated only when such an op is selected -- an
+     * AoS element is 16 B, so the array holds nel() = n/2 elements = 2n floats = the same 8n
+     * bytes as a/b. The output reuses OutSet::base (also 8n bytes, 16 B capable). */
+    float *vin;
+    float mat[16];
     OutSet out[2];
     double in_cs;
 };
 
-/* 掩码密度（--mask-density）：0.5 = 旧行为 */
+/* mask density (--mask-density): 0.5 = the old behaviour */
 static double g_mask_density = 0.5;
 
 static uint64_t g_rng = 0x243f6a8885a308d3ull;
@@ -281,9 +321,13 @@ static float rnd_pm1(void)
 
 static void prefill(OutSet &O, size_t n);
 
-/* 选中了 vec3/vec4 op 时为真：分配 az/bz/aw/bw 与 base2（vec4 SoA 的 oz/ow 要用）。
- * 默认扫描（全是 vec2）不分配，内存足迹与以前完全一致。 */
+/* True when a vec3/vec4 op is selected: allocate az/bz/aw/bw and base2 (vec4 SoA needs
+ * oz/ow). The default sweep (all vec2) allocates nothing and keeps the old footprint. */
 static bool g_wide = false;
+/* True when a matrix-transform op is selected: allocate vin + mat (see Buf). Kept separate
+ * from g_wide so a 16 B AoS op does not pay for the SoA component arrays (4 x 4n floats plus
+ * 16n bytes of base2 at the largest tier). */
+static bool g_mat4 = false;
 
 static void alloc_buf(Buf &B, size_t n, bool with_pipe)
 {
@@ -309,10 +353,12 @@ static void alloc_buf(Buf &B, size_t n, bool with_pipe)
         B.aw = (float *)xalloc(n * sizeof(float));
         B.bw = (float *)xalloc(n * sizeof(float));
     }
+    if (g_mat4) B.vin = (float *)xalloc(2u * n * sizeof(float)); /* nel() * 4 floats */
     const bool need2 = with_pipe || g_wide;
-    /* 两套输出必须连续分配、相距恰好 n*8 字节。n*8 是 4096 的整数倍，于是 out[0] 与
-     * out[1] 相对 a/b 的 mod-4096 偏移完全相同——否则 A 与 B 会落进不同的
-     * store/load 4K 别名关系，在 L1/L2 驻留档能凭空差出 20%（实测踩过）。 */
+    /* The two output sets must be allocated contiguously and exactly n*8 bytes apart. n*8 is
+     * a multiple of 4096, so out[0] and out[1] share the same offset relative to a/b modulo
+     * 4096 -- otherwise A and B fall into different 4K store/load aliasing relations and can
+     * differ by 20% out of nowhere at the L1/L2 tiers (measured, been there). */
     void *blk = xalloc(2u * n * sizeof(fv_vec2));
     void *blk2 = need2 ? xalloc(2u * n * sizeof(fv_vec2)) : nullptr;
     for (int k = 0; k < 2; ++k) {
@@ -334,6 +380,7 @@ static void alloc_buf(Buf &B, size_t n, bool with_pipe)
     B.alloc_bytes = n * (2 * sizeof(fv_vec2) + 1 + sizeof(uint32_t) + 4 * sizeof(float));
     B.alloc_bytes += 2u * n * sizeof(fv_vec2);
     if (with_pipe) B.alloc_bytes += n * (4 * sizeof(float) + 2 * sizeof(fv_vec2));
+    if (g_mat4) B.alloc_bytes += 2u * n * sizeof(float) + sizeof B.mat;
 }
 
 static void free_buf(Buf &B)
@@ -354,13 +401,14 @@ static void free_buf(Buf &B)
     std::free(B.bz);
     std::free(B.aw);
     std::free(B.bw);
-    std::free(B.out[0].base); /* 两套输出是同一块内存的前后两半 */
+    std::free(B.vin);
+    std::free(B.out[0].base); /* both output sets are the two halves of one block */
     std::free(B.out[0].base2);
     std::memset(&B, 0, sizeof B);
 }
 
-/* 管线 scratch 的确定性重灌：collision 拿它当法线/速度输入，chain3 拿它当 t/u。
- * 因为会互相覆盖，px..qy 不计入输入校验和。 */
+/* Deterministic refill of the pipeline scratch: collision uses it as normal/velocity input,
+ * chain3 as t/u. Because they overwrite each other, px..qy never enter the input checksum. */
 static void init_pipe(Buf &B)
 {
     if (!B.px) return;
@@ -373,8 +421,9 @@ static void init_pipe(Buf &B)
     }
 }
 
-/* 数据只取决于 n 与固定种子。每 512 个元素放一个精确零向量，专门覆盖 normalize 的
- * 零向量保护分支——否则"keep 掩码取反"这类错误在本夹具里完全不可见。 */
+/* The data depends only on n and a fixed seed. One exact zero vector every 512 elements
+ * covers normalize's zero-vector guard -- without it an error such as an inverted keep mask
+ * would be completely invisible in this fixture. */
 static void init_data(Buf &B, size_t n)
 {
     g_rng = 0x243f6a8885a308d3ull;
@@ -401,8 +450,9 @@ static void init_data(Buf &B, size_t n)
             h ^= h >> 15;
             h *= 2246822519u;
             h ^= h >> 13;
-            /* 掩码密度可调（--mask-density）：_mask / _mask_inplace 的"稀疏度"要能扫。
-             * 用 24 位尾数比较，密度 0.5 时与旧版 ((h>>11)&1) 的统计性质相同。 */
+            /* Mask density is adjustable (--mask-density) so the sparsity of _mask /
+             * _mask_inplace can be swept. The 24-bit mantissa comparison has the same
+             * statistics as the old ((h>>11)&1) at density 0.5. */
             B.mask[i] = (uint8_t)(((double)((h >> 8) & 0xFFFFFFu) / 16777216.0 < g_mask_density)
                                       ? 1u
                                       : 0u);
@@ -416,7 +466,8 @@ static void init_data(Buf &B, size_t n)
         B.idx[j] = t;
     }
     if (B.az) {
-        /* 宽元素的分量数组：用同一条确定性序列，语义上是"第 3/4 个分量" */
+        /* component arrays of wide elements: same deterministic sequence, semantically
+         * "component 3/4" */
         for (size_t i = 0; i < n; ++i) {
             const uint32_t h = (uint32_t)(i * 2654435761u);
             B.az[i] = (float)((double)(h & 0xFFFFu) * (1.0 / 32768.0)) - 1.0f;
@@ -425,18 +476,36 @@ static void init_data(Buf &B, size_t n)
             B.bw[i] = (float)((double)(((h >> 13) ^ 0x1b873593u) & 0xFFFFu) * (1.0 / 32768.0)) -
                       1.0f;
         }
-        /* 每 512 个元素放一个精确零向量（覆盖 normalize 的零保护，vec3/vec4 同样适用） */
+        /* one exact zero vector every 512 elements (covers normalize's zero guard; vec3 and
+         * vec4 get the same treatment) */
         for (size_t i = 0; i < n; i += 512) {
             B.az[i] = 0.0f;
             B.aw[i] = 0.0f;
         }
     }
     init_pipe(B);
-    for (int k = 0; k < 2; ++k) prefill(B.out[k], n); /* 预触碰：RSS 核对与 warm 口径都靠它 */
+    if (B.vin) {
+        /* 16 B AoS corpus for the matrix transforms. Drawn last so the vec2/vec3/vec4 corpora
+         * above stay bit-identical to what they were before these ops existed.
+         * Every component is random, including w: the contract says in.w is *not read* (it is
+         * the constant 1 for points, 0 for dirs), so a kernel that accidentally used it would
+         * disagree with the reference instead of passing by luck. */
+        for (size_t i = 0; i < 2 * n; ++i) B.vin[i] = rnd_pm1();
+        for (int k = 0; k < 12; ++k) B.mat[k] = rnd_pm1();
+        B.mat[12] = 0.0f; /* affine precondition: last row is (0, 0, 0, 1) */
+        B.mat[13] = 0.0f;
+        B.mat[14] = 0.0f;
+        B.mat[15] = 1.0f;
+    }
+    for (int k = 0; k < 2; ++k) prefill(B.out[k], n); /* pre-touch: RSS check and warm runs */
     double s = 0.0;
     for (size_t i = 0; i < n; ++i) {
         s += (double)B.a[i].x + (double)B.a[i].y + (double)B.b[i].x + (double)B.b[i].y;
         s += (double)B.mask[i] + (double)B.idx[i];
+    }
+    if (B.vin) {
+        for (size_t i = 0; i < 2 * n; ++i) s += (double)B.vin[i];
+        for (int k = 0; k < 16; ++k) s += (double)B.mat[k];
     }
     B.in_cs = s;
 }
@@ -472,7 +541,7 @@ static void drop_pages(Buf &B)
 }
 
 /* =====================================================================
- * 三、独立参考实现（纯标量、顺序、不调用库的批量入口）
+ * 3. Independent reference implementations (pure scalar, sequential, no library batch call)
  * ===================================================================== */
 static std::string fbits_str(float f)
 {
@@ -500,7 +569,7 @@ static std::string cmp_vec2(const char *what, const fv_vec2 *X, const fv_vec2 *R
     if (!bad) return std::string();
     char buf[512];
     std::snprintf(buf, sizeof buf,
-                  "%s 不一致: 共 %zu/%zu 个元素位模式不同；首个 i=%zu got(x,y)=%s,%s want=%s,%s",
+                  "%s mismatch: %zu/%zu element bit patterns differ; first i=%zu got(x,y)=%s,%s want=%s,%s",
                   what, bad, n, first, fbits_str(X[first].x).c_str(),
                   fbits_str(X[first].y).c_str(), fbits_str(R[first].x).c_str(),
                   fbits_str(R[first].y).c_str());
@@ -522,7 +591,8 @@ static std::string cmp_floats(const char *what, const float *X, const float *R, 
     if (!bad) return std::string();
     char buf[512];
     std::snprintf(buf, sizeof buf,
-                  "%s 不一致: 共 %zu/%zu 个值位模式不同；首个 i=%zu got=%s want=%s", what, bad, n,
+                  "%s mismatch: %zu/%zu value bit patterns differ; first i=%zu got=%s want=%s",
+                  what, bad, n,
                   first, fbits_str(X[first]).c_str(), fbits_str(R[first]).c_str());
     return std::string(buf);
 }
@@ -547,9 +617,10 @@ static inline void scalar_reflect(float nx, float ny, float vx, float vy, float 
 }
 
 
-/* ================= vec3 / vec4 参考实现（纯标量、顺序、不调库） ================= */
-#if AB_OPS_EXTRA /* 这些入口默认不在注册表里，参考实现跟着一起编掉 */
-/* vec3：元素 12 B，三个分量数组。零向量保护与 fv_vec2_normalize 同语义（len<=FV_EPS → 0）。 */
+/* ================= vec3 / vec4 references (pure scalar, sequential, no library) ========= */
+#if AB_OPS_EXTRA /* these entries are off the registry by default; the references go too */
+/* vec3: 12 B elements, three component arrays. The zero guard matches
+ * fv_vec2_normalize (len<=FV_EPS -> 0). */
 static void ref_v3_add(Buf &B, size_t n, OutSet &O)
 {
     for (size_t i = 0; i < n; ++i) {
@@ -600,7 +671,7 @@ static void ref_v3_norm(Buf &B, size_t n, OutSet &O)
         }
     }
 }
-/* vec4 AoS（16 B/元素）：2 个元素装满一个 ymm，所以是 _x2。 */
+/* vec4 AoS (16 B/element): two elements fill one ymm, hence _x2. */
 static void ref_v4_add_x2(Buf &B, size_t n, OutSet &O)
 {
     const fv_vec4 *a = (const fv_vec4 *)B.a, *b = (const fv_vec4 *)B.b;
@@ -696,7 +767,45 @@ static void ref_v4_norm(Buf &B, size_t n, OutSet &O)
 
 #endif /* AB_OPS_EXTRA */
 
-/* ---- 每个 op 的参考实现（签名统一，放进 OPS 表） ---- */
+/* ---- per-op reference implementation (one signature, stored in the OPS table) ---- */
+/* Independent scalar references for the matrix transforms. The header promises bit-identical
+ * results under exactly two conditions, and both are reproduced here or EXACT could not hold:
+ *   1) the evaluation order is ((m0*x + m1*y) + m2*z) + m3;
+ *   2) no FMA (the build uses -ffp-contract=off and the kernels live in a matching pragma);
+ * dirs simply drops the translation term instead of adding m3 * 0 -- x + (+0.0) turns -0.0
+ * into +0.0, and the kernel does not perform that add either. out.w is written as the
+ * documented constant rather than computed. */
+static void ref_mat4_points(Buf &B, size_t n, OutSet &O)
+{
+    const float *m = B.mat;
+    const float *in = B.vin;
+    float *out = (float *)(void *)O.o;
+    for (size_t i = 0; i < n; ++i) {
+        const float x = in[4 * i + 0];
+        const float y = in[4 * i + 1];
+        const float z = in[4 * i + 2];
+        out[4 * i + 0] = ((m[0] * x + m[1] * y) + m[2] * z) + m[3];
+        out[4 * i + 1] = ((m[4] * x + m[5] * y) + m[6] * z) + m[7];
+        out[4 * i + 2] = ((m[8] * x + m[9] * y) + m[10] * z) + m[11];
+        out[4 * i + 3] = 1.0f;
+    }
+}
+static void ref_mat4_dirs(Buf &B, size_t n, OutSet &O)
+{
+    const float *m = B.mat;
+    const float *in = B.vin;
+    float *out = (float *)(void *)O.o;
+    for (size_t i = 0; i < n; ++i) {
+        const float x = in[4 * i + 0];
+        const float y = in[4 * i + 1];
+        const float z = in[4 * i + 2];
+        out[4 * i + 0] = (m[0] * x + m[1] * y) + m[2] * z;
+        out[4 * i + 1] = (m[4] * x + m[5] * y) + m[6] * z;
+        out[4 * i + 2] = (m[8] * x + m[9] * y) + m[10] * z;
+        out[4 * i + 3] = 0.0f;
+    }
+}
+
 typedef void (*RefFn)(Buf &B, size_t n, OutSet &O);
 
 static void ref_add_x4(Buf &B, size_t n, OutSet &O)
@@ -745,9 +854,10 @@ static void ref_add_mask(Buf &B, size_t n, OutSet &O)
         }
     }
 }
-/* 就地稀疏加：mask[i] != 0 时 o[i] = a[i] + b[i]，否则 o[i] = a[i]（保持原值）。
- * 驱动把 O.o 当作那个"可写数组"传进去（见 exec 的 AB_OPF_INPLACE 分支）。
- * 暂时只服务实验区的 _mask_inplace 行；把它挪进默认表时去掉下面这个 #if。 */
+/* In-place sparse add: o[i] = a[i] + b[i] where mask[i] != 0, else o[i] = a[i] (unchanged).
+ * The driver passes O.o as the writable array (see the AB_OPF_INPLACE branch of exec).
+ * For now it only serves the experimental _mask_inplace row; drop the #if below when that row
+ * moves into the default table. */
 #if AB_OPS_EXTRA
 static void ref_add_mask_inplace(Buf &B, size_t n, OutSet &O)
 {
@@ -793,8 +903,9 @@ static void ref_scale_soa(Buf &B, size_t n, OutSet &O)
 }
 static void ref_dot_soa(Buf &B, size_t n, OutSet &O)
 {
-    /* 用 double 累加并同时记下 Σ|逐项积|：容差要按"项的量级"定，不能按结果的相对值定
-     * （结果接近抵消时相对误差会爆，n 越大越明显，实测 n=2^18 就能到 7e-5）。 */
+    /* Accumulate in double while also recording sum|term|: the tolerance has to follow the
+     * magnitude of the terms, not of the result (when the result nearly cancels out a relative
+     * error explodes -- measured 7e-5 already at n=2^18). */
     double s = 0.0, a = 0.0;
     for (size_t i = 0; i < n; ++i) {
         const double t = (double)B.ax[i] * (double)B.bx[i] + (double)B.ay[i] * (double)B.by[i];
@@ -830,7 +941,8 @@ static void ref_chain3(Buf &B, size_t n, OutSet &O)
         scalar_normalize(ux, uy, &O.ox[i], &O.oy[i]);
     }
 }
-/* ---- 上限参考（不经过变体 TU；A/B 跑同一段代码，比值即纯噪声探针） ---- */
+/* ---- ceiling references (bypass the variant TU; A/B runs identical code, so the ratio is a
+ * pure noise probe) ---- */
 static void mem_memcpy(Buf &B, size_t n, OutSet &O)
 {
     std::memcpy(O.o, B.a, n * sizeof(fv_vec2));
@@ -868,23 +980,24 @@ static void mem_triad(Buf &B, size_t n, OutSet &O)
 }
 
 /* =====================================================================
- * 四、op 表
+ * 4. The op table
  * ===================================================================== */
 struct Op {
     const char *name;
-    size_t rd, wr; /* 实际每元素读/写字节（名义；真实流量另算，见 real_wr_bytes） */
-    size_t elop;   /* 元素宽度（字节）：vec2 8 / vec3 12 / vec4 16 —— 由 KIND 决定 */
+    size_t rd, wr; /* nominal read/write bytes per element (real traffic: real_wr_bytes) */
+    size_t elop;   /* element width in bytes: vec2 8 / vec3 12 / vec4 16 */
     OutKind kind;
     Policy pol;
-    RefFn ref;       /* 参考实现；POL_NOCHECK 时为空 */
-    RefFn local_run; /* 不经过变体 TU 的实现（上限参考）；为空则走 ab_X_loop */
-    int abi_op;      /* AB_OP_*；-1 表示 local_run */
+    RefFn ref;       /* reference implementation; null for POL_NOCHECK */
+    RefFn local_run; /* implementation that bypasses the variant TU (ceiling); null = ab_X_loop */
+    int abi_op;      /* AB_OP_*; -1 means local_run */
     unsigned flags;  /* AB_OPF_* / AB_MF_* */
-    int rfo;         /* AB_RFO_*：普通 store 的写分配行为（真实流量记账用） */
-    const char *note;/* RFO 记账的人读依据 */
+    int rfo;         /* AB_RFO_*: write-allocate behaviour of the plain store (real traffic) */
+    const char *note;/* human-readable basis of the RFO accounting */
 };
 
-/* 表由 ab_ops.h 的注册表展开：驱动里没有任何 per-op 代码，加 op 不改这里。 */
+/* The table is expanded from the ab_ops.h registry: the driver holds no per-op code, so
+ * adding an op never touches this file. */
 static const Op OPS[] = {
 #define AB_LIB_ROW(ID, NAME, KIND, ELOP, POL, REF, FLAGS, RD, WR, RFO, NOTE)                    \
     {NAME, RD, WR, ELOP, OUT_##KIND, POL_##POL, REF, nullptr, AB_OP_##ID, FLAGS, RFO, NOTE},
@@ -898,21 +1011,24 @@ static const Op OPS[] = {
 };
 static const size_t OP_COUNT = sizeof(OPS) / sizeof(OPS[0]);
 
-/* 注册表增删自动跟随，不写死数字（19 是 15 批量入口 + 4 上限参考的老账） */
+/* Follows registry additions/removals instead of hard-coding numbers (19 used to be 15 batch
+ * entries + 4 ceiling references) */
 #define AB_COUNT_ITEM(...) +1
 enum {
     N_LIB_OPS = 0 AB_LIB_OPS(AB_COUNT_ITEM) AB_LIB_OPS_EXTRA(AB_COUNT_ITEM),
     N_MEM_OPS = 0 AB_MEM_OPS(AB_COUNT_ITEM)
 };
 #undef AB_COUNT_ITEM
-static_assert(sizeof(OPS) / sizeof(OPS[0]) == N_LIB_OPS + N_MEM_OPS, "OPS 表与注册表不一致");
+static_assert(sizeof(OPS) / sizeof(OPS[0]) == N_LIB_OPS + N_MEM_OPS,
+              "the OPS table and the registry disagree");
 
 static bool has_flag(const Op &op, unsigned f)
 {
     return (op.flags & f) != 0;
 }
 
-/* 逐规模判据里要剔除的档（逗号分隔；默认 131072 = L3 边界，A/A 地板本身不可分辨） */
+/* Tiers to exclude from the per-size criterion (comma separated; default 131072 = the L3
+ * boundary, where the A/A floor itself is unresolvable) */
 static bool tier_excluded(size_t n, const std::string &list)
 {
     size_t p = 0;
@@ -926,14 +1042,15 @@ static bool tier_excluded(size_t n, const std::string &list)
     return false;
 }
 
-/* 该 op 在扫描规模 n（8 B 单位）下处理多少个**自己的元素**。
- * n*8 是所有 op 共同的字节量，所以不同元素宽度的 op 之间是字节归一的。 */
+/* How many **of its own elements** this op processes at sweep size n (8 B units).
+ * n*8 is the byte volume every op shares, so ops of different element width are
+ * byte-normalized. */
 static size_t nel(const Op &op, size_t n)
 {
     return op.elop ? (n * 8u) / op.elop : n;
 }
 
-/* 上限参考按**角色**取用，不按下标（往表里插行不会错位） */
+/* Ceiling references are picked by **role**, not by index (inserting a row cannot shift them) */
 static size_t memref_index(unsigned role)
 {
     for (size_t k = 0; k < OP_COUNT; ++k)
@@ -941,7 +1058,7 @@ static size_t memref_index(unsigned role)
     return OP_COUNT;
 }
 
-/* INTRA 对（ab_ops.h 的 AB_INTRA_PAIRS）：新入口 ID -> 参照入口 ID */
+/* INTRA pairs (AB_INTRA_PAIRS in ab_ops.h): new entry ID -> reference entry ID */
 struct IntraPair {
     int a, b;
 };
@@ -949,7 +1066,7 @@ static const IntraPair kIntra[] = {
 #define AB_INTRA_ITEM(A, B) {AB_OP_##A, AB_OP_##B},
     AB_INTRA_PAIRS(AB_INTRA_ITEM)
 #undef AB_INTRA_ITEM
-    {-1, -1} /* 哨兵：AB_OPS_EXTRA=0 时表为空也必须合法 */
+    {-1, -1} /* sentinel: the table must stay legal even when AB_OPS_EXTRA=0 empties it */
 };
 
 static size_t op_index_of_id(int id)
@@ -974,12 +1091,12 @@ static unsigned side_opflags(int side, int abi_op)
     return ab_s_opflags(abi_op);
 }
 
-/* 输出数组的**真实**写流量（B/元素）：
- *   NT store        -> wr            （不经过 cache、不产生 RFO）
- *   写目标已被读过   -> wr            （就地更新；行本来就在 cache 里）
- *   libc 自己选      -> wr            （不确定，标注 libc?，不参与判定）
- *   普通 store       -> wr * 2        （写一次 + RFO 把该 line 读进来一次）
- * 输入（读）永远按 1x。 */
+/* The **real** write traffic of the output array (B/element):
+ *   NT store                -> wr      (bypasses the cache, no RFO)
+ *   target was already read -> wr      (in-place update; the line is already cached)
+ *   libc picks for itself   -> wr      (uncertain, flagged libc?, never judged)
+ *   plain store             -> wr * 2  (one write + one RFO pulling the line in)
+ * Input (read) traffic is always counted 1x. */
 static size_t real_wr_bytes(const Op &op, int side)
 {
     if (op.wr == 0) return 0;
@@ -1000,7 +1117,7 @@ static const char *rfo_side_name(const Op &op, int side)
     case AB_RFO_LIBC:
         return "libc?";
     case AB_RFO_NT:
-        return "miss*"; /* 本侧没有 NT 入口，退化成普通 store */
+        return "miss*"; /* this side has no NT entry, so it degrades to a plain store */
     default:
         return "miss";
     }
@@ -1043,11 +1160,15 @@ static AbArgs mk_args(Buf &B, OutSet &O)
     p.bw = B.bw;
     p.oz = O.oz;
     p.ow = O.ow;
+    p.mat = B.mat;
+    p.vin = B.vin;
+    p.vout = (void *)O.o; /* AoS output, same 8n bytes as the vec2 output buffer */
     return p;
 }
 
-/* 就地算子：输出数组先被灌成 a 的内容，然后**它自己**就是那个可写数组。
- * 这样 B.a 永远不被写，"输入校验和不变"这条门禁对就地算子同样成立。 */
+/* In-place ops: the output array is first filled with a's contents and then **is** the
+ * writable array itself. That way B.a is never written and the "input checksum unchanged"
+ * gate holds for in-place ops too. */
 static void seed_inplace(const Op &op, Buf &B, OutSet &O)
 {
     if (!has_flag(op, AB_OPF_INPLACE)) return;
@@ -1056,7 +1177,7 @@ static void seed_inplace(const Op &op, Buf &B, OutSet &O)
 
 static void exec(const Op &op, int side, Buf &B, OutSet &O, long iters)
 {
-    if (op.kind == OUT_NONE) O.dot = 0.0f; /* 归约型算子把 dot 当累加器用 */
+    if (op.kind == OUT_NONE) O.dot = 0.0f; /* reduction ops use dot as the accumulator */
     if (op.abi_op >= 0) {
         AbArgs p = mk_args(B, O);
         if (has_flag(op, AB_OPF_INPLACE)) p.a = O.o;
@@ -1068,7 +1189,7 @@ static void exec(const Op &op, int side, Buf &B, OutSet &O, long iters)
 }
 
 /* =====================================================================
- * 五、校验和 / 门禁
+ * 5. Checksums and gates
  * ===================================================================== */
 static double out_sum(const Op &op, const OutSet &O, size_t n)
 {
@@ -1092,7 +1213,8 @@ static double out_sum(const Op &op, const OutSet &O, size_t n)
         for (size_t i = 0; i < n; ++i)
             s += (double)O.ox[i] + (double)O.oy[i] + (double)O.oz[i] + (double)O.ow[i];
         break;
-    case OUT_VEC4: {
+    case OUT_VEC4:
+    case OUT_VEC4M: {
         const fv_vec4 *v = (const fv_vec4 *)O.o;
         for (size_t i = 0; i < n; ++i)
             s += (double)v[i].x + (double)v[i].y + (double)v[i].z + (double)v[i].w;
@@ -1144,7 +1266,8 @@ static std::string cmp_out(const Op &op, const OutSet &X, const OutSet &R, size_
         return cmp_floats("ow[]", X.ow, R.ow, n);
     }
     case OUT_VEC4:
-        /* fv_vec4 是 4 个 float，逐位比较等价于把它当 4n 个 float 比 */
+    case OUT_VEC4M:
+        /* fv_vec4 is 4 floats, so a bitwise compare is a compare of 4n floats */
         return cmp_floats("o[].xyzw", (const float *)(const void *)X.o,
                           (const float *)(const void *)R.o, 4 * n);
     case OUT_FLOAT:
@@ -1156,8 +1279,8 @@ static std::string cmp_out(const Op &op, const OutSet &X, const OutSet &R, size_
         if (d <= tol) return std::string();
         char buf[512];
         std::snprintf(buf, sizeof buf,
-                      "结果超出容差: got=%s want=%s |diff|=%.4g > tol=%.4g (=max(%.0e*|r|, "
-                      "%.0e*Σ|项|))",
+                      "out of tolerance: got=%s want=%s |diff|=%.4g > tol=%.4g (=max(%.0e*|r|, "
+                      "%.0e*sum|term|))",
                       fbits_str(X.dot).c_str(), fbits_str(R.dot).c_str(), d, tol,
                       (double)AB_REL_FRAC, (double)AB_ABS_FRAC);
         return std::string(buf);
@@ -1180,7 +1303,7 @@ static Gate check_op(const Op &op, Buf &B, size_t n, bool with_scalar)
     OutSet &P = B.out[0];
     OutSet &R = B.out[1];
 
-    if (op.pol == POL_NOCHECK) { /* 上限参考：A/B 同一段代码，只验位级相等 */
+    if (op.pol == POL_NOCHECK) { /* ceiling reference: A/B run the same code, check bits only */
         prefill(P, n);
         exec(op, SIDE_A, B, P, 1);
         prefill(R, n);
@@ -1190,19 +1313,22 @@ static Gate check_op(const Op &op, Buf &B, size_t n, bool with_scalar)
         std::string m = cmp_out(op, P, R, nel(op, n));
         if (!m.empty()) {
             g.ok = false;
-            g.why = "  A 与 B 输出不一致（上限参考本应完全相同）: " + m + "\n";
+            g.why = "  A and B outputs differ (a ceiling reference should be identical): " + m +
+                    "\n";
         }
         g.cs_ref = g.cs_a;
         return g;
     }
 
-    const size_t ne = nel(op, n); /* 本 op 的元素数（字节量恒定，宽度不同则元素数不同） */
+    const size_t ne = nel(op, n); /* element count of this op (byte volume is constant) */
     prefill(R, n);
     op.ref(B, ne, R);
 
     if (has_flag(op, AB_OPF_NO_BASELINE)) {
-        /* 基线（git HEAD）里根本没有这个入口：A 侧不参与，只验 candidate vs 独立标量参考。
-         * 这条路径的结论只能说"实现与标量语义一致"，不能说"比基线快"。 */
+        /* The baseline (git HEAD) has no such entry at all: side A does not take part, only
+         * "candidate vs independent scalar reference" is checked. The most this path can say
+         * is "the implementation matches the scalar semantics", never "it is faster than the
+         * baseline". */
         const double abs0 = R.abs_sum;
         prefill(P, n);
         exec(op, SIDE_B, B, P, 1);
@@ -1211,7 +1337,7 @@ static Gate check_op(const Op &op, Buf &B, size_t n, bool with_scalar)
         std::string mb = cmp_out(op, P, R, ne);
         if (!mb.empty()) {
             g.ok = false;
-            g.why += "  candidate vs 参考: " + mb + "\n";
+            g.why += "  candidate vs reference: " + mb + "\n";
         }
         R.abs_sum = abs0;
         return g;
@@ -1233,10 +1359,10 @@ static Gate check_op(const Op &op, Buf &B, size_t n, bool with_scalar)
 
     if (!m_ar.empty() || !m_br.empty()) {
         g.ok = false;
-        if (!m_ar.empty()) g.why += "  baseline vs 参考: " + m_ar + "\n";
-        if (!m_br.empty()) g.why += "  candidate vs 参考: " + m_br + "\n";
+        if (!m_ar.empty()) g.why += "  baseline vs reference: " + m_ar + "\n";
+        if (!m_br.empty()) g.why += "  candidate vs reference: " + m_br + "\n";
     }
-    if (g.ok && with_scalar && op.kind != OUT_SOA4) { /* 标量锚点也过一遍门禁 */
+    if (g.ok && with_scalar && op.kind != OUT_SOA4) { /* the scalar anchor goes through the gate too */
         OutSet S = R;
         S.dot = R.dot;
         prefill(S, n);
@@ -1244,7 +1370,7 @@ static Gate check_op(const Op &op, Buf &B, size_t n, bool with_scalar)
         std::string ms = cmp_out(op, S, R, ne);
         if (!ms.empty()) {
             g.ok = false;
-            g.why += "  scalar_loop 锚点 vs 参考: " + ms + "\n";
+            g.why += "  scalar_loop anchor vs reference: " + ms + "\n";
         }
     }
     R.abs_sum = abs_sum;
@@ -1252,7 +1378,7 @@ static Gate check_op(const Op &op, Buf &B, size_t n, bool with_scalar)
 }
 
 /* =====================================================================
- * 六、计时与统计
+ * 6. Timing and statistics
  * ===================================================================== */
 static double median(std::vector<double> v)
 {
@@ -1263,9 +1389,11 @@ static double median(std::vector<double> v)
     return 0.5 * (v[m / 2 - 1] + v[m / 2]);
 }
 
-/* 配对差比的四分位距（相对中位数）。比"样本 CoV"稳健得多：这台机器上偶发的
- * 多倍停顿会把 std 拉爆，于是 CoV 判所有点都不可信，而实际比值分布很紧。
- * 可分辨性判据因此用本函数，CoV 仍然照报（父任务点名要的指标）。 */
+/* Interquartile range of the paired ratios (relative to the median). Far more robust than
+ * the sample CoV: an occasional multi-x stall on this machine blows up std, so a CoV test
+ * declares every point unresolvable while the ratio distribution is actually tight.
+ * Resolvability is therefore decided by this function; CoV is still reported (the metric the
+ * parent task asked for by name). */
 static double iqr_pct(std::vector<double> v)
 {
     if (v.size() < 4) return 0.0;
@@ -1276,7 +1404,7 @@ static double iqr_pct(std::vector<double> v)
     return (m > 0.0) ? (q75 - q25) / m * 100.0 : 0.0;
 }
 
-/* 分位数（线性插值）。地板要给 p50/p90/max 三个数，不能只给 max。 */
+/* Quantile (linear interpolation). The floor needs p50/p90/max -- max alone is not enough. */
 static double quantile(std::vector<double> v, double q)
 {
     if (v.empty()) return 0.0;
@@ -1301,13 +1429,13 @@ static double cov_pct(const std::vector<double> &v)
     return std::sqrt(s / (double)(v.size() - 1)) / m * 100.0;
 }
 
-/* 返回 ns/元素（或 ns/调用，调用方自己乘除） */
+/* Returns ns/element (or ns/call: the caller multiplies/divides as needed) */
 static double measure(const Op &op, int side, Buf &B, OutSet &O, long iters)
 {
     const double t0 = now_ns();
     exec(op, side, B, O, iters);
     const double t1 = now_ns();
-    const size_t m = nel(op, B.n); /* 元素数按本 op 的元素宽度算（字节量恒定） */
+    const size_t m = nel(op, B.n); /* element count from this op width (byte volume constant) */
     return (t1 - t0) / (double)iters / (double)(m ? m : 1);
 }
 
@@ -1323,14 +1451,16 @@ struct Pt {
     double a_med, b_med, ratio, ratio_m, pr_min, pr_max, a_cov, b_cov, riqr;
     double a_min, a_max, b_min, b_max;
     double gbs_a, gbs_b, pct_memcpy_a, pct_memcpy_b;
-    /* RFO 记账：真实流量 = rd + wr*(RFO?2:1)。两侧分别算，因为一侧可能是 NT store
-     * 而另一侧退化成普通 store（见 ab_variant.cpp 的 *_opflags）。 */
+    /* RFO accounting: real traffic = rd + wr*(RFO ? 2 : 1). Computed per side, because one
+     * side may use an NT store while the other degrades to a plain store (see *_opflags in
+     * ab_variant.cpp). */
     double real_gbs_a, real_gbs_b, real_pct_memcpy_a, real_pct_memcpy_b;
     size_t real_rd, real_wr_a, real_wr_b;
-    int rfo; /* AB_RFO_*（行上的声明；实际是否 NT 由 rfo_side_name 报） */
-    const char *mode;   /* "ab"（A/B）或 "intra"（candidate 内部对照） */
-    const char *ref_op; /* intra 模式下的参照 op 名；ab 模式为 "-" */
-    /* 同一轮里与 A/B 交错跑的 A/A 配对（R4 的分母：同分布、同数据、同一段时间） */
+    int rfo; /* AB_RFO_* declaration of the row (whether NT really happened: rfo_side_name) */
+    const char *mode;   /* "ab" (A/B) or "intra" (control inside the candidate) */
+    const char *ref_op; /* reference op name in intra mode; "-" in ab mode */
+    /* A/A pairs interleaved with A/B inside the same round (R4 denominator: same
+     * distribution, same data, same time window) */
     int aa_n;
     double aa_p50, aa_p90, aa_max, aa_dev_max;
     int trials;
@@ -1341,8 +1471,9 @@ struct Pt {
     size_t rd, wr;
 };
 
-/* 小 N 区制覆盖的算子：注册表里带 AB_OPF_SMALL 的（标量锚点 ab_s_loop 已实现）。
- * 用标志而不是下标，往表里插行/加 op 都不会让覆盖面悄悄变掉。 */
+/* Ops covered by the small-N regime: those flagged AB_OPF_SMALL in the registry (the scalar
+ * anchor ab_s_loop implements them). A flag rather than an index, so inserting rows or adding
+ * ops can never silently change the coverage. */
 static bool small_supported(int opi)
 {
     return (size_t)opi < OP_COUNT && (OPS[opi].flags & AB_OPF_SMALL) != 0;
@@ -1373,21 +1504,22 @@ struct Args {
     std::vector<size_t> sizes;
     std::vector<size_t> small_ns;
     std::string ops_filter;
-    std::string op_exact; /* --op=<精确名>：verify 用，避免 substring 误匹配 */
+    std::string op_exact; /* --op=<exact name>: used by verify to avoid substring hits */
     std::string label;
     std::string tsv_out, matrix_out, small_out, floor_out;
     int trials_min, trials_max;
     double cov_target, target_ms, small_target_ms;
     bool selfcheck, do_cold, do_pipe, do_small;
-    bool gate_only; /* 只跑位级门禁，不出任何计时结果（verify 的 R1） */
-    bool list_ops;  /* 打印注册表后退出（verify 用它判断 op 在不在） */
-    /* 每一轮 A/B 之后紧接一对 A/A：R4 的分母必须与 A/B 同分布（同进程/同数据/同一段时间） */
+    bool gate_only; /* bit-level gates only, no timing output at all (R1 of verify) */
+    bool list_ops;  /* print the registry and exit (verify uses it to test membership) */
+    /* one A/A pair right after every A/B round: the R4 denominator must share the A/B
+     * distribution (same process, same data, same time window) */
     bool aa_each_round;
-    bool intra;     /* INTRA 模式：新入口 vs candidate 内部的同字节量对照 op */
-    double mask_density; /* _mask / _mask_inplace 的掩码密度 */
-    std::string tier_exclude; /* 逐规模判据里剔除的档（默认 131072） */
-    int order;    /* 0=交错(默认) 1=总是 A 先 2=总是 B 先 */
-    bool swap_out; /* 交换 A/B 使用的输出缓冲（诊断缓冲不对称） */
+    bool intra;     /* INTRA mode: new entry vs a same-byte-volume control op in the candidate */
+    double mask_density; /* mask density of _mask / _mask_inplace */
+    std::string tier_exclude; /* tiers excluded from the per-size criterion (default 131072) */
+    int order;    /* 0=interleaved 1=always A first (default) 2=always B first */
+    bool swap_out; /* swap the output buffers used by A/B (diagnose buffer asymmetry) */
 };
 
 static bool parse_args(int argc, char **argv, Args &A)
@@ -1410,10 +1542,12 @@ static bool parse_args(int argc, char **argv, Args &A)
     A.mask_density = 0.5;
     A.tier_exclude = "131072";
     A.label = AB_LABEL;
-    /* 默认固定"先 A 后 B"。理由（实测）：在 2^20 上 order=ab 得 ratio 0.995 / CoV 9.7%，
-     * order=ba 得 1.030 / 34.5%，交错得 1.305 / 24.3%——固定顺序把"每个配对处在两种不同
-     * 进入状态"这个混杂因素去掉了，配对比值分布不再是两个总体的混合；而 ab 与 ba 都
-     * 落在 1.0 附近，说明顺序本身没有系统性偏置。要交叉核对就用 --order=ba。 */
+    /* Default is a fixed "A then B". Why (measured): at 2^20 order=ab gives ratio 0.995 /
+     * CoV 9.7%, order=ba gives 1.030 / 34.5% and interleaving gives 1.305 / 24.3%. A fixed
+     * order removes the confounder "each pair enters in one of two different states", so the
+     * paired-ratio distribution is no longer a mixture of two populations; and since ab and ba
+     * both land near 1.0, order itself carries no systematic bias. Use --order=ba to
+     * cross-check. */
     A.order = 1;
     A.swap_out = false;
     for (int i = 1; i < argc; ++i) {
@@ -1437,19 +1571,22 @@ static bool parse_args(int argc, char **argv, Args &A)
         std::string v;
         if (a == "--help" || a == "-h") {
             std::printf(
-                "用法: %s [选项]\n"
-                "  --sizes=4096,...       大 N 吞吐扫描（默认 2^12..2^24 共 8 档）\n"
-                "  --small=4,8,16,32,64   小 N 调用开销区制（n 的取值）\n"
-                "  --ops=子串              只看匹配的入口\n"
-                "  --op=精确名              只看这一个入口（verify 用）\n"
-                "  --gate-only            只跑位级门禁（不出计时/吞吐），不通过则退出码 4\n"
-                "  --list-ops             打印 op 注册表后退出\n"
-                "  --floor-out=FILE       落盘 A/A 地板表（只对 SELFCHECK 构建有意义）\n"
-                "  --trials-min=5 --trials-max=12 --cov=5.0  自适应取样\n"
-                "  --target-ms=8          大 N 每取样目标时长；--small-target-ms=20\n"
-                "  --selfcheck            baseline vs baseline 自检（逐规模判据用该档 A/A 地板 p90）\n"
-                "  --aa-each-round        每轮 A/B 后紧跟一对 A/A（R4 与逐规模判据的分母）\n"
-                "  --tier-exclude=131072  逐规模判据剔除的档（只记录不判）\n"
+                "usage: %s [options]\n"
+                "  --sizes=4096,...      large-N throughput sweep (default 2^12..2^24, 8 tiers)\n"
+                "  --small=4,8,16,32,64  small-N call-overhead regime (the n values)\n"
+                "  --ops=SUBSTR          only entries whose name matches the substring\n"
+                "  --op=EXACT            only this single entry (used by verify)\n"
+                "  --gate-only           bit-level gates only (no timing/throughput); exit 4 on\n"
+                "                        a failing gate\n"
+                "  --list-ops            print the op registry and exit\n"
+                "  --floor-out=FILE      write the A/A floor table (meaningful for SELFCHECK)\n"
+                "  --trials-min=5 --trials-max=12 --cov=5.0  adaptive sampling\n"
+                "  --target-ms=8         per-trial target for large N; --small-target-ms=20\n"
+                "  --selfcheck           baseline vs baseline self-check (the per-size\n"
+                "                        criterion uses that tier's A/A floor p90)\n"
+                "  --aa-each-round       run one A/A pair after every A/B round (denominator of\n"
+                "                        R4 and of the per-size criterion)\n"
+                "  --tier-exclude=131072 tier left out of the per-size criterion (recorded only)\n"
                 "  --no-cold / --no-pipe / --no-small\n"
                 "  --label=.. --tsv-out=.. --matrix-out=.. --small-out=..\n",
                 argv[0]);
@@ -1519,42 +1656,47 @@ static bool parse_args(int argc, char **argv, Args &A)
         } else if (a == "--no-small") {
             A.do_small = false;
         } else {
-            std::fprintf(stderr, "未知参数: %s（--help 看用法）\n", a.c_str());
+            std::fprintf(stderr, "unknown argument: %s (see --help)\n", a.c_str());
             return false;
         }
     }
     if (A.trials_min < 5)
-        std::fprintf(stderr, "警告: --trials-min=%d < 5，违反「每档至少 5 次取样」的要求\n",
+        std::fprintf(stderr, "warning: --trials-min=%d < 5, fewer trials than the required 5\n",
                      A.trials_min);
     return true;
 }
 
 /* =====================================================================
- * 七、主流程
+ * 7. Main flow
  * ===================================================================== */
 int main(int argc, char **argv)
 {
     Args args;
     if (!parse_args(argc, argv, args)) return 2;
 
-    /* ABI 指纹：A/B/标量锚点三份 TU 的 fv_vec2 / fv_real 布局必须与驱动一致 */
+    /* ABI fingerprint: the fv_vec2 / fv_real layout of all three TUs (A, B, scalar anchor)
+     * must match the driver's */
     {
         const unsigned long long want =
             ((unsigned long long)sizeof(fv_vec2) << 32) | (unsigned)sizeof(fv_real);
         const unsigned long long ga = ab_a_abi(), gb = ab_b_abi(), gs = ab_s_abi();
         if (ga != want || gb != want || gs != want) {
             std::printf("#####################################################################\n");
-            std::printf("## 硬失败：ABI 指纹不一致。驱动 %llu，A %llu，B %llu，标量锚点 %llu\n",
+            std::printf("## hard failure: ABI fingerprint mismatch. driver %llu, A %llu, B %llu, "
+                        "scalar anchor %llu\n",
                         want, ga, gb, gs);
-            std::printf("## 意思是某个变体 TU 的 fv_vec2 / fv_real 与驱动不同（头文件被改过布局？）。\n");
-            std::printf("## 这种情况下所有指针都会被解释成错误的结构，不能测，直接退出。\n");
+            std::printf("## some variant TU's fv_vec2 / fv_real differs from the driver's (header "
+                        "layout changed?).\n");
+            std::printf("## every pointer would then be read as the wrong struct, so nothing can "
+                        "be measured; exiting.\n");
             std::printf("#####################################################################\n");
             return 5;
         }
     }
 
-    /* --list-ops：注册表就是"有哪些 op 可测"的唯一真源；verify.sh 与文档都用它，
-     * 不在这里口述列表（口述的列表一定会和表漂移）。 */
+    /* --list-ops: the registry is the only source of truth for "which ops exist"; verify.sh
+     * and the docs both use it, so the list is never restated here (a restated list always
+     * drifts away from the table). */
     if (args.list_ops) {
         std::printf("# op\tabi_op\trd\twr\treal_rd\treal_wr_a\treal_wr_b\trfo\tflags\telop"
                     "\tintra_ref\tnote\n");
@@ -1569,8 +1711,8 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* 显式点名一个"基线里不存在"的入口时，自动切到 INTRA 模式：
-     * A/B 对它们无意义（A 侧根本没有这个函数）。 */
+    /* Naming an entry that does not exist in the baseline switches to INTRA automatically:
+     * A/B is meaningless for it (side A has no such function at all). */
     if (!args.op_exact.empty() && !args.intra) {
         for (size_t k = 0; k < OP_COUNT; ++k)
             if (args.op_exact == OPS[k].name && has_flag(OPS[k], AB_OPF_NO_BASELINE)) {
@@ -1582,7 +1724,8 @@ int main(int argc, char **argv)
     std::vector<size_t> sel;
     for (size_t k = 0; k < OP_COUNT; ++k) {
         if (has_flag(OPS[k], AB_OPF_PIPE) && !args.do_pipe) continue;
-        /* 新 API（vec3/vec4）在基线里不存在：A/B 模式把它们排除，INTRA 模式只要它们 */
+        /* the new API (vec3/vec4) is absent from the baseline: A/B excludes it, INTRA takes
+         * nothing else */
         if (args.intra != has_flag(OPS[k], AB_OPF_NO_BASELINE)) continue;
         if (!args.op_exact.empty()) {
             if (args.op_exact != OPS[k].name) continue;
@@ -1591,37 +1734,44 @@ int main(int argc, char **argv)
             continue;
         sel.push_back(k);
     }
-    /* 宽元素（12 B / 16 B）才需要 az/bz/aw/bw 与 base2 */
-    for (size_t k : sel)
-        if (OPS[k].elop != 8) g_wide = true;
+    /* only wide SoA elements (vec3 12 B / vec4 16 B) need az/bz/aw/bw and base2; the matrix
+     * transforms are 16 B AoS and need only vin + mat, so they must not drag the SoA arrays in */
+    for (size_t k : sel) {
+        if (OPS[k].kind == OUT_VEC4M)
+            g_mat4 = true;
+        else if (OPS[k].elop != 8)
+            g_wide = true;
+    }
     if (sel.empty()) {
-        std::fprintf(stderr, "没有入口匹配 --ops=%s%s%s（--list-ops 看注册表）\n",
+        std::fprintf(stderr, "no entry matches --ops=%s%s%s (see the registry with --list-ops)\n",
                      args.ops_filter.c_str(), args.op_exact.empty() ? "" : " --op=",
                      args.op_exact.c_str());
         return 2;
     }
     if (args.intra)
-        std::printf("# 模式: INTRA（candidate 内部对照；**不是**相对 git HEAD 的改进）\n");
+        std::printf("# mode: INTRA (a control inside the candidate; **not** an improvement "
+                    "over git HEAD)\n");
 
-    /* --gate-only：只跑位级门禁。verify 用它做"全尾长"对拍（n = N-7 … N+3 覆盖
-     * _x4 的 0-3、_soa 的 0-7 尾巴），不产生任何计时数字。 */
+    /* --gate-only: bit-level gates only. verify uses it for the all-tail-lengths comparison
+     * (n = N-7 .. N+3 covers the 0-3 tail of _x4 and the 0-7 tail of _soa) and it produces no
+     * timing numbers at all. */
     if (args.gate_only) {
-        std::printf("# gate-only：%zu 个 op × %zu 个规模（位级对拍，A/B/独立参考三者一致）\n",
+        std::printf("# gate-only: %zu ops x %zu sizes (bit-level, A/B/independent reference agree)\n",
                     sel.size(), args.sizes.size());
         size_t nfail = 0, ntot = 0;
         for (size_t n : args.sizes) {
             Buf B;
-            alloc_buf(B, n, args.do_pipe); /* 管线算子要用 px/py/qx/qy scratch */
+            alloc_buf(B, n, args.do_pipe); /* pipeline ops need the px/py/qx/qy scratch */
             init_data(B, n);
             for (size_t k : sel) {
                 const Op &op = OPS[k];
-                if (has_flag(op, AB_OPF_PIPE)) init_pipe(B); /* 上一个 op 可能写过 scratch */
+                if (has_flag(op, AB_OPF_PIPE)) init_pipe(B); /* the previous op may have written it */
                 const double in_cs = B.in_cs;
                 Gate g = check_op(op, B, n, small_supported((int)k));
                 bool ok = g.ok;
                 if (B.in_cs != in_cs) {
                     ok = false;
-                    g.why += "  实现改写了输入缓冲（a/b/mask/idx）\n";
+                    g.why += "  the implementation wrote the input buffers (a/b/mask/idx)\n";
                 }
                 ++ntot;
                 if (!ok) {
@@ -1631,7 +1781,7 @@ int main(int argc, char **argv)
             }
             free_buf(B);
         }
-        std::printf("# gate-only 结果: %zu/%zu 通过\n", ntot - nfail, ntot);
+        std::printf("# gate-only result: %zu/%zu passed\n", ntot - nfail, ntot);
         return nfail ? 4 : 0;
     }
 
@@ -1641,33 +1791,38 @@ int main(int argc, char **argv)
     const long rss0 = self_statm(2);
 
     std::printf("=====================================================================\n");
-    std::printf("flashvec 同进程 A/B 交错夹具   label=%s\n", args.label.c_str());
-    std::printf("  baseline  : git HEAD 快照 bench/ab/snapshot/  rev=%s\n", AB_GIT_REV);
+    std::printf("flashvec in-process A/B interleaving fixture   label=%s\n", args.label.c_str());
+    std::printf("  baseline  : git HEAD snapshot bench/ab/snapshot/  rev=%s\n", AB_GIT_REV);
     std::printf("  candidate : %s\n", AB_CAND_DESC);
-    std::printf("  编译选项  : 与顶层 Makefile 默认一致（无 -march；AVX2 靠函数级派发）\n");
-    std::printf("  入口      : %zu / %zu（注册表：AB_LIB_OPS %d 个%s + AB_MEM_OPS %d 个上限参考）\n",
-                sel.size(), OP_COUNT, (int)N_LIB_OPS, args.do_pipe ? "（含管线）" : "（无管线）",
-                (int)N_MEM_OPS);
-    std::printf("  大 N 扫描 :");
+    std::printf("  build     : same as the top-level Makefile defaults (no -march; AVX2 by "
+                "per-function dispatch)\n");
+    std::printf("  entries   : %zu / %zu (registry: AB_LIB_OPS %d%s + AB_MEM_OPS %d\n"
+                "              ceiling references)\n",
+                sel.size(), OP_COUNT, (int)N_LIB_OPS,
+                args.do_pipe ? " (with pipeline)" : " (no pipeline)", (int)N_MEM_OPS);
+    std::printf("  large N   :");
     for (size_t n : args.sizes) std::printf(" 2^%.0f", std::log2((double)n));
-    std::printf("\n  小 N 区制 :");
+    std::printf("\n  small N   :");
     for (size_t n : args.small_ns) std::printf(" %zu", n);
-    if (!args.do_small) std::printf(" (关闭)");
+    if (!args.do_small) std::printf(" (off)");
     std::printf("\n");
-    std::printf("  取样      : 每点最少 %d 次、最多 %d 次，到【配对差比 IQR】< %.1f%% 为止；大 N 目标 %.1f "
-                "ms/次、小 N 目标 %.1f ms/次\n",
+    std::printf("  sampling  : at least %d and at most %d trials per point, until the\n"
+                "              [paired-ratio IQR] < %.1f%%; large-N target %.1f ms/trial,\n"
+                "              small-N target %.1f ms/trial\n",
                 args.trials_min, args.trials_max, args.cov_target, args.target_ms,
                 args.small_target_ms);
-    std::printf("  缓存层级  : L1d 32 KiB / L2 512 KiB / L3 4 MiB（单 CCX，cpu0-7）\n");
-    std::printf("  线程      : 单线程；库无多线程无全局状态；绑核见 Makefile 的 taskset\n");
-    std::printf("  频率      : governor=performance，观测 %.0f-%.0f MHz（均 %.0f）-- 未固定，"
-                "绝对值不可跨会话比\n",
+    std::printf("  cache     : L1d 32 KiB / L2 512 KiB / L3 4 MiB (single CCX, cpu0-7)\n");
+    std::printf("  threads   : single-threaded; the library has no threads and no global\n"
+                "              state; pinning via taskset in the Makefile\n");
+    std::printf("  frequency : governor=performance, observed %.0f-%.0f MHz (mean %.0f) --\n"
+                "              not pinned, so absolute values do not carry across sessions\n",
                 mn0, mx0, av0);
-    std::printf("  负载      : loadavg(1m)=%.2f；MemAvailable=%ld MiB；VmSwap=%ld MiB；起始 RSS=%ld MiB\n",
+    std::printf("  load      : loadavg(1m)=%.2f; MemAvailable=%ld MiB; VmSwap=%ld MiB; initial "
+                "RSS=%ld MiB\n",
                 load_start, mem_available_mib(), proc_kb("VmSwap") / 1024, rss0 * 4 / 1024);
-    std::printf("  计时基准  : %s\n", g_clock_name);
-    std::printf("  口径      : GB/s=(读字节+写字节)/时间；%%memcpy=该点 GB/s / 同规模 memcpy；"
-                "ratio=median(每轮 A/B)\n");
+    std::printf("  clock     : %s\n", g_clock_name);
+    std::printf("  accounting: GB/s=(bytes read+written)/time; %%memcpy=this point's GB/s /\n"
+                "              memcpy at the same size; ratio=median(per-round A/B)\n");
     std::printf("=====================================================================\n");
 
     {
@@ -1677,12 +1832,12 @@ int main(int argc, char **argv)
         (void)acc;
     }
 
-    int verdict = 0; /* 0=通过 3=自检失败（仍然落盘，方便复核） */
+    int verdict = 0; /* 0=pass 3=self-check failed (still written to disk for review) */
     std::vector<Pt> pts;
     bool any_gate_fail = false;
     size_t n_gate = 0, n_gate_fail = 0;
 
-    /* ================= 小 N 区制：调用开销 ================= */
+    /* ================= small-N regime: call overhead ================= */
     struct SmallPt {
         const char *op;
         size_t n;
@@ -1697,8 +1852,10 @@ int main(int argc, char **argv)
     if (args.do_small) {
         Buf SB;
         alloc_buf(SB, args.small_ns.back(), false);
-        std::printf("\n=== 小 N 区制（调用开销；缓冲区常驻 L1，每次调用只碰 n 个元素） ===\n");
-        std::printf("  ns/call 才是这一区制的瓶颈指标；ns/elem 会把调用开销摊薄。\n");
+        std::printf("\n=== small-N regime (call overhead; buffers stay in L1, each call touches "
+                    "only n elements) ===\n");
+        std::printf("  ns/call is the bottleneck metric of this regime; ns/elem dilutes the call "
+                    "overhead.\n");
         std::printf("%-4s %-24s %10s %11s %11s %6s %10s %10s %11s %8s %s\n", "n", "op", "calls",
                     "ns/call(A)", "ns/call(B)", "ratio", "ns/el(A)", "ns/el(B)",
                     "scalar/call", "A/scalar", "checksum");
@@ -1719,7 +1876,7 @@ int main(int argc, char **argv)
                 std::vector<double> ta, tb, ts, pr;
                 long calls = 1;
                 {
-                    (void)measure(op, SIDE_A, SB, SB.out[0], 1000); /* 先热 i-cache/分支预测 */
+                    (void)measure(op, SIDE_A, SB, SB.out[0], 1000); /* warm i-cache/predictors */
                     const double one = measure(op, SIDE_A, SB, SB.out[0], 1) * (double)n;
                     calls = (long)(args.small_target_ms * 1e6 / std::max(one, 1.0));
                     if (calls < 100) calls = 100;
@@ -1753,7 +1910,7 @@ int main(int argc, char **argv)
                 sp.s_ns_call = median(ts) * (double)n;
                 sp.ratio = median(pr);
                 sp.scalar_x = sp.s_ns_call / sp.a_ns_call;
-                sp.a_cov = iqr_pct(pr); /* 小 N 里这个字段就是配对 IQR% */
+                sp.a_cov = iqr_pct(pr); /* in small N this field is the paired IQR% */
                 sp.b_cov = cov_pct(ta);
                 sp.trials = (int)ta.size();
                 sp.calls = calls;
@@ -1770,7 +1927,7 @@ int main(int argc, char **argv)
         std::printf("\n");
     }
 
-    /* ================= 大 N 吞吐扫描 ================= */
+    /* ================= large-N throughput sweep ================= */
     for (size_t n : args.sizes) {
         const long rss_before = self_statm(2);
         const long mf_before = self_minflt();
@@ -1782,9 +1939,10 @@ int main(int argc, char **argv)
             (rss_after > rss_before) ? (size_t)(rss_after - rss_before) * 4096 : 0;
         const bool rss_bad = rss_grew * 10 < B.alloc_bytes * 9;
 
-        std::printf("\n=== 规模 n=%zu  分配 %.1f MiB  RSS 增 %.1f MiB%s  loadavg=%.2f ===\n", n,
+        std::printf("\n=== size n=%zu  allocated %.1f MiB  RSS +%.1f MiB%s  loadavg=%.2f ===\n", n,
                     (double)B.alloc_bytes / 1048576.0, (double)rss_grew / 1048576.0,
-                    rss_bad ? "  [!! RSS 明显小于预期，可能被换出，本档吞吐不可信]" : "",
+                    rss_bad ? "  [!! RSS below expectation: pages may be swapped, "
+                              "throughput unreliable]" : "",
                     loadavg1());
 
         std::vector<Gate> gates(OP_COUNT);
@@ -1794,7 +1952,7 @@ int main(int argc, char **argv)
             ++n_gate;
             if (B.in_cs != in_cs) {
                 gates[k].ok = false;
-                gates[k].why += "  实现改写了输入缓冲（a/b/mask/idx）\n";
+                gates[k].why += "  the implementation wrote the input buffers (a/b/mask/idx)\n";
             }
             if (!gates[k].ok) {
                 ++n_gate_fail;
@@ -1805,16 +1963,17 @@ int main(int argc, char **argv)
         if (any_gate_fail) {
             std::printf("\n");
             std::printf("#####################################################################\n");
-            std::printf("## 硬失败：校验和门禁不通过（%zu/%zu 项）。\n", n_gate_fail, n_gate);
-            std::printf("## 上面每一项都指名了函数：baseline / candidate / 独立标量参考实现在该\n");
-            std::printf("## 函数上算的不是同一个东西。任何比值与吞吐都没有意义——\n");
-            std::printf("## 本次不输出任何计时/吞吐结果。\n");
+            std::printf("## hard failure: the checksum gate failed (%zu/%zu items).\n", n_gate_fail,
+                        n_gate);
+            std::printf("## every item above names the function: baseline / candidate / independent\n");
+            std::printf("## scalar reference do not compute the same thing there. Any ratio and any\n");
+            std::printf("## throughput would be meaningless, so this run prints no timing or\n## throughput results.\n");
             std::printf("#####################################################################\n");
             free_buf(B);
             return 4;
         }
 
-        /* 一个测量点：自适应取样 + 交错 */
+        /* one measurement point: adaptive sampling + interleaving */
         auto run_point = [&](size_t opi, bool cold) -> Pt {
             const Op &op = OPS[opi];
             Pt p{};
@@ -1834,22 +1993,26 @@ int main(int argc, char **argv)
             long iters = 1;
             int tmax = args.trials_max;
             if (!cold) {
-                /* 先预热再校准：第一次调用的 i-cache / 分支预测是冷的，拿它当校准基准
-                 * 会把内层重复次数估小一个数量级（踩过）。 */
+                /* Warm up before calibrating: the first call runs with a cold i-cache and cold
+                 * predictors, and using it as the calibration base underestimates the inner
+                 * repetition count by an order of magnitude (been there). */
                 (void)measure(op, SIDE_A, B, B.out[0], 4);
-                /* measure 返回 ns/本 op 的元素；乘元素数才是"一次调用"的时长 */
+                /* measure returns ns/element of this op; multiply by the element count to get
+                 * the duration of one call */
                 const double one = measure(op, SIDE_A, B, B.out[0], 1) * (double)nel(op, n);
                 iters = (long)(args.target_ms * 1e6 / std::max(one, 1.0));
                 if (iters < 1) iters = 1;
                 if (iters > 200000) iters = 200000;
-                /* 单次调用就已经超过 30 ms 的点（DRAM 档）不追 12 次取样：那是纯烧时间 */
+                /* points whose single call already exceeds 30 ms (the DRAM tiers) do not chase
+                 * 12 trials: that is pure burn */
                 if (one > 30e6) tmax = std::min(args.trials_max, 7);
                 (void)measure(op, SIDE_A, B, B.out[0], iters);
                 (void)measure(op, SIDE_B, B, B.out[1], iters);
             }
             for (int t = 0; t < tmax; ++t) {
-                /* 停止条件看"配对差比的四分位距"，不是样本 CoV：我们要判定的是比值，
-                 * 样本 std 被偶发停顿一拉就爆，会在比值已经很稳的时候还继续烧时间。 */
+                /* The stop condition looks at the interquartile range of the paired ratios, not
+                 * at the sample CoV: the ratio is what gets judged, and a sample std blows up on
+                 * one stall -- which would keep burning time long after the ratio settled. */
                 if (t >= args.trials_min && iqr_pct(pr) < args.cov_target) break;
                 double x, y;
                 OutSet &OA = args.swap_out ? B.out[1] : B.out[0];
@@ -1870,8 +2033,9 @@ int main(int argc, char **argv)
                 tb.push_back(y);
                 pr.push_back(x / y);
                 if (args.aa_each_round) {
-                    /* 同一轮、同一段代码、同一份数据里再跑一对 A/A：这就是 R4 的分母。
-                     * 它和 A/B 处在同一浸入状态与同一频率漂移段里，才是同分布的地板。 */
+                    /* One more A/A pair inside the same round, the same code and the same data:
+                     * this is the R4 denominator. Only while it shares the A/B immersion state
+                     * and clock-drift segment is it a same-distribution floor. */
                     const double u = measure(op, SIDE_A, B, OA, cold ? 1 : iters);
                     const double v = measure(op, SIDE_A, B, OB, cold ? 1 : iters);
                     aa.push_back(u / v);
@@ -1879,7 +2043,7 @@ int main(int argc, char **argv)
             }
             p.a_med = median(ta);
             p.b_med = median(tb);
-            p.ratio = median(pr); /* 主判据：配对消漂移 */
+            p.ratio = median(pr); /* main criterion: pairing cancels the drift */
             p.ratio_m = p.a_med / p.b_med;
             p.a_min = *std::min_element(ta.begin(), ta.end());
             p.a_max = *std::max_element(ta.begin(), ta.end());
@@ -1914,9 +2078,10 @@ int main(int argc, char **argv)
         };
 
 
-        /* ---- INTRA：candidate 内部对照（新入口 vs 同字节量的既有入口） ----
-         * 两个 op 都走 **B 侧**（candidate）。ratio = t_ref / t_new，>1 表示新入口更快。
-         * 这不是"相对基线"，因为基线里没有这些入口。 */
+        /* ---- INTRA: a control inside the candidate (new entry vs an existing entry that
+         * moves the same bytes). Both ops run on **side B** (the candidate).
+         * ratio = t_ref / t_new, > 1 means the new entry is faster. This is not "relative to
+         * the baseline", because the baseline has none of these entries. */
         auto run_pair = [&](size_t inew, size_t iref) -> Pt {
             const Op &nw = OPS[inew], &rf = OPS[iref];
             Pt p{};
@@ -1958,12 +2123,14 @@ int main(int argc, char **argv)
                 }
                 tr.push_back(x);
                 tn.push_back(y);
-                /* 按字节归一：两个 op 的元素宽度不同，x/y 直接比是"每元素"而不是"每字节"。
-                 * 一次调用的总时长 = ns/元素 * 元素数，两者处理相同字节量，所以这样才是
-                 * "同一份工作量谁更快"。 */
+                /* Normalize by bytes: the two ops have different element widths, so comparing
+                 * x/y directly is per element rather than per byte. Total time per call =
+                 * ns/element * element count, and both move the same byte volume, so this is
+                 * the honest "who is faster for the same work". */
                 pr.push_back((x * (double)nel(rf, n)) / (y * (double)nel(nw, n)));
                 if (args.aa_each_round) {
-                    /* A/A 地板用**参照 op** 打：它代表这一档的"同代码两次"噪声 */
+                    /* The A/A floor is taken with the **reference op**: it represents this
+                     * tier's "same code twice" noise */
                     const double u = measure(rf, SIDE_B, B, B.out[0], iters);
                     const double v = measure(rf, SIDE_B, B, B.out[1], iters);
                     aa.push_back(u / v);
@@ -1996,11 +2163,15 @@ int main(int argc, char **argv)
             return p;
         };
 
-        /* ---- INTRA 报表（显式标注：candidate 内部对照，不是相对 HEAD 的改进） ---- */
+        /* ---- INTRA report (explicitly labelled: a control inside the candidate, not an
+         * improvement over HEAD) ---- */
         if (args.intra) {
-            std::printf("\n--- INTRA 对照：candidate 内部（新入口 vs 同字节量的既有入口）---\n");
-            std::printf("--- **这不是相对 git HEAD 基线的改进**：这些入口在 HEAD 里不存在。   ---\n");
-            std::printf("--- 两个 op 在同一档处理相同字节量；ratio = t(ref)/t(new)，>1 表示新入口更快 ---\n");
+            std::printf("\n--- INTRA control: inside the candidate (new entry vs an existing entry "
+                        "moving the same bytes) ---\n");
+            std::printf("--- **this is not an improvement over git HEAD**: these entries do not exist "
+                        "in HEAD ---\n");
+            std::printf("--- both ops move the same bytes in one tier; ratio = t(ref)/t(new), >1 means "
+                        "the new entry is faster ---\n");
             std::printf("%-24s %-22s %7s %7s %10s %10s %6s %9s %9s %-14s %s\n", "op(new)", "ref",
                         "n(new)", "n(ref)", "ns/e(new)", "ns/e(ref)", "ratio", "GB/s(new)",
                         "GB/s(ref)", "AA p50/p90/max", "flags");
@@ -2009,7 +2180,8 @@ int main(int argc, char **argv)
                 if (!has_flag(nw, AB_OPF_NO_BASELINE)) continue;
                 const size_t iref = intra_ref_of(k);
                 if (iref >= OP_COUNT) {
-                    std::printf("%-24s %-22s （注册表里没有 INTRA 对，跳过）\n", nw.name, "-");
+                    std::printf("%-24s %-22s (no INTRA pair in the registry, skipped)\n", nw.name,
+                                "-");
                     continue;
                 }
                 Pt pp = run_pair(k, iref);
@@ -2026,9 +2198,10 @@ int main(int argc, char **argv)
             continue;
         }
 
-        /* 上限参考（%memcpy 的分母；memset/纯读/triad 用同一条公式，故只需两个分母）。
-         * real_* 用 memcpy 的**真实**流量作分母——memcpy 自己在大规模上很可能就是 NT store
-         * （libc?），所以这一列的绝对值不可全信，但同一档内比较可用。 */
+        /* Ceiling references (the %memcpy denominators; memset/pure-read/triad use the same
+         * formula, so two denominators suffice). The real_* figures divide by memcpy's **real**
+         * traffic -- at scale memcpy itself is probably an NT store (libc?), so the absolute
+         * value of that column is not fully trustworthy, while comparisons within a tier are. */
         double memcpy_warm = 0.0, memcpy_cold = 0.0;
         double memcpy_real_warm = 0.0, memcpy_real_cold = 0.0;
         auto apply_pct = [](Pt &p, double mem, double mem_real) {
@@ -2063,11 +2236,13 @@ int main(int argc, char **argv)
             pts.push_back(w);
         }
 
-        /* warm 全跑完（数据还完好），再跑 cold（cold 会把页清空，避免污染后面的 warm） */
-        std::printf("%-24s %5s %7s %5s %8s %9s %6s %10s %9s %9s %6s %-15s %3s %-9s %-14s %s\n",
+        /* Run every warm point first (the data is still intact), then cold (cold empties the
+         * pages, so it must not pollute a later warm run) */
+        std::printf("%-24s %5s %7s %5s %8s %9s %6s %10s %9s %9s %6s %-15s %3s %-9s %-14s "
+                    "%-22s %s\n",
                     "op", "B/e", "realB/e", "tier", "GB/s", "realGB/s", "%mem", "CoV/IQR%",
                     "A_med", "B_med", "ratio", "pair[min,max]", "tr", "rfo",
-                    "AA p50/p90/max", "flags");
+                    "AA p50/p90/max", "checksum", "flags");
         for (size_t k : sel) {
             const Op &op = OPS[k];
             if (op.pol == POL_NOCHECK) continue;
@@ -2075,13 +2250,17 @@ int main(int argc, char **argv)
             const size_t ws = (op.rd + op.wr) * nel(op, n);
             Pt pw = run_point(k, false);
             apply_pct(pw, memcpy_warm, memcpy_real_warm);
-            /* 就地算子的输出状态在多次计时调用后已经"跑飞"（每次都在同一个缓冲上累加），
-             * 所以计时后不再比 A/B；位级结论由计时前的 check_op 给。 */
+            /* After many timed calls an in-place op's output state has run away (it keeps
+             * accumulating into the same buffer), so A/B is not compared after timing; the
+             * bit-level verdict comes from check_op before timing. */
             if (!has_flag(op, AB_OPF_INPLACE)) {
                 std::string m =
-                    cmp_out(op, B.out[0], B.out[1], n); /* 计时后重比，顺带读遍输出 */
+                    /* Element count, not the sweep size: the output array holds nel() elements,
+                     * and for a 16 B element kind 4 * n floats would read twice the buffer and
+                     * report every op as broken. */
+                    cmp_out(op, B.out[0], B.out[1], nel(op, n));
                 if (!m.empty()) {
-                    std::printf("  [GATE FAIL] %s @ n=%zu: 计时后 A/B 输出不一致: %s\n",
+                    std::printf("  [GATE FAIL] %s @ n=%zu: A/B outputs differ after timing: %s\n",
                                 op.name, n, m.c_str());
                     any_gate_fail = true;
                 }
@@ -2111,7 +2290,8 @@ int main(int argc, char **argv)
                         checksum_text(op, pw.cs_a, pw.cs_b, pw.cs_ref).c_str(), fl);
             std::fflush(stdout);
         }
-        std::printf("  -- 上限参考（同一档、同一计时器；A/B 同一段代码，比值即噪声） --\n");
+        std::printf("  -- ceiling references (same tier, same clock; A/B run identical code, so "
+                    "the ratio is noise) --\n");
         std::printf("  %-16s %5s %7s %5s %8s %9s  %s\n", "op", "B/e", "realB/e", "tier", "GB/s",
                     "realGB/s", "ratio  CoV");
         for (const Pt &p : pts) {
@@ -2122,7 +2302,7 @@ int main(int argc, char **argv)
                         tier_of((p.rd + p.wr) * n), p.gbs_a, p.real_gbs_a, p.ratio, p.a_cov,
                         rfo_side_name(OPS[p.opi], SIDE_A));
         }
-        std::printf("  -- cold（madvise(DONTNEED) 后单次调用，含 page fault） --\n");
+        std::printf("  -- cold (one call after madvise(DONTNEED), page faults included) --\n");
         if (args.do_cold) {
             std::printf("  %-24s %8s %9s %6s %-15s\n", "op", "coldGB/s", "coldRGB/s",
                         "%memC", "pair[min,max]");
@@ -2148,19 +2328,20 @@ int main(int argc, char **argv)
             }
         }
         const long mf = self_minflt();
-        std::printf("  (本档 minor fault %ld 次；释放 %.1f MiB，VmSwap=%ld MiB)\n",
+        std::printf("  (this tier: %ld minor faults; freed %.1f MiB, VmSwap=%ld MiB)\n",
                     (mf > mf_before) ? (mf - mf_before) : -1,
                     (double)B.alloc_bytes / 1048576.0, proc_kb("VmSwap") / 1024);
         free_buf(B);
         if (any_gate_fail) return 4;
     }
 
-    /* ================= 汇总 ================= */
-    std::printf("\n=== 汇总 ===\n");
-    std::printf("校验和门禁: %zu/%zu 项通过（A、B、独立参考实现三者一致；dot_soa 走 "
-                "max(%.0e*|r|, %.0e*Σ|项|)）\n",
+    /* ================= summary ================= */
+    std::printf("\n=== summary ===\n");
+    std::printf("checksum gates: %zu/%zu items passed (A, B and the independent reference\n"
+                "agree; dot_soa uses max(%.0e*|r|, %.0e*sum|term|))\n",
                 n_gate - n_gate_fail, n_gate, (double)AB_REL_FRAC, (double)AB_ABS_FRAC);
-    std::printf("大 N 测量点: %zu（warm+cold）  小 N 测量点: %zu  负载: loadavg(1m) %.2f -> %.2f\n",
+    std::printf("large-N points: %zu (warm+cold)  small-N points: %zu  load: loadavg(1m) %.2f -> "
+                "%.2f\n",
                 pts.size(), small.size(), load_start, loadavg1());
 
     auto find_pt = [&](size_t opi, size_t n, bool cold) -> const Pt * {
@@ -2170,7 +2351,8 @@ int main(int argc, char **argv)
     };
 
     for (int cold = 0; cold <= (args.do_cold ? 1 : 0); ++cold) {
-        std::printf("\n--- 吞吐矩阵：%s，GB/s（单线程；rd+wr 都算） ---\n", cold ? "cold" : "warm");
+        std::printf("\n--- throughput matrix: %s, GB/s (single-threaded; rd+wr both counted) ---\n",
+                    cold ? "cold" : "warm");
         std::printf("%-24s", "op");
         for (size_t n : args.sizes) std::printf(" %9.0f", (double)n);
         std::printf("\n");
@@ -2186,7 +2368,7 @@ int main(int argc, char **argv)
             }
             std::printf("\n");
         }
-        std::printf("\n--- 占同规模 memcpy 吞吐的百分比：%s ---\n", cold ? "cold" : "warm");
+        std::printf("\n--- percent of same-size memcpy throughput: %s ---\n", cold ? "cold" : "warm");
         std::printf("%-24s", "op");
         for (size_t n : args.sizes) std::printf(" %9.0f", (double)n);
         std::printf("\n");
@@ -2204,7 +2386,7 @@ int main(int argc, char **argv)
         }
     }
 
-    std::printf("\n--- candidate/baseline 比值矩阵（warm；>1 = candidate 更快） ---\n");
+    std::printf("\n--- candidate/baseline ratio matrix (warm; >1 = candidate is faster) ---\n");
     std::printf("%-24s", "op");
     for (size_t n : args.sizes) std::printf(" %9.0f", (double)n);
     std::printf("\n");
@@ -2221,7 +2403,8 @@ int main(int argc, char **argv)
         std::printf("\n");
     }
 
-    std::printf("\n--- 真实内存流量矩阵（warm，GB/s；RFO 记账后：普通 store 写按 2x、NT store 按 1x） ---\n");
+    std::printf("\n--- real memory-traffic matrix (warm, GB/s; after RFO accounting: plain store "
+                "writes 2x, NT store 1x) ---\n");
     std::printf("%-24s", "op");
     for (size_t n : args.sizes) std::printf(" %9.0f", (double)n);
     std::printf("\n");
@@ -2238,9 +2421,10 @@ int main(int argc, char **argv)
         std::printf("\n");
     }
 
-    std::printf("\n--- RFO 记账：名义 vs 真实内存流量（每元素字节；real/nom = 真实/名义） ---\n");
+    std::printf("\n--- RFO accounting: nominal vs real memory traffic (bytes per element; "
+                "real/nom = real/nominal) ---\n");
     std::printf("%-24s %4s %4s %8s %8s %9s  %-9s %s\n", "op", "rd", "wr", "realA", "realB",
-                "real/nom", "rfo", "依据");
+                "real/nom", "rfo", "basis");
     for (const size_t opi : sel) {
         const Op &op = OPS[opi];
         const size_t wa = real_wr_bytes(op, SIDE_A), wb = real_wr_bytes(op, SIDE_B);
@@ -2255,11 +2439,15 @@ int main(int argc, char **argv)
         std::printf("%-24s %4zu %4zu %8zu %8zu %8.2fx  %-9s %s\n", op.name, op.rd, op.wr,
                     op.rd + wa, op.rd + wb, fac, rf, op.note);
     }
-    std::printf("  （real/nom 就是「NT store 的真实收益」的量化：同一份名义 24 B/e 的 add 算子，\n");
-    std::printf("    普通 store 真实 32 B/e、NT store 真实 24 B/e —— 差的是流量不是速度；\n");
-    std::printf("    A/B 两列不同 = 一侧退化成普通 store（baseline 头文件还没有 _stream）。）\n");
+    std::printf("  (real/nom quantifies the real payoff of an NT store: the same add op with a "
+                "nominal 24 B/e\n");
+    std::printf("   a plain store moves 32 B/e real, an NT store 24 B/e real -- the difference\n"
+                "   is traffic, not speed;\n");
+    std::printf("   different A/B columns = one side degraded to a plain store, i.e. the baseline "
+                "header has no _stream yet.)\n");
 
-    std::printf("\n--- 吞吐拐点（warm）：相对自身峰值掉到 50%% 的规模 ---\n");
+    std::printf("\n--- throughput knee (warm): the size where throughput drops to 50%% of its own "
+                "peak ---\n");
     for (const size_t opi : sel) {
         double peak = 0.0;
         size_t peak_n = 0;
@@ -2271,11 +2459,11 @@ int main(int argc, char **argv)
             }
         }
         if (peak <= 0.0) continue;
-        std::printf("  %-24s 峰值 %6.2f GB/s @ n=%-8zu", OPS[opi].name, peak, peak_n);
+        std::printf("  %-24s peak %6.2f GB/s @ n=%-8zu", OPS[opi].name, peak, peak_n);
         for (size_t n : args.sizes) {
             const Pt *p = find_pt(opi, n, false);
             if (p && n > peak_n && p->gbs_a < peak * 0.5) {
-                std::printf("  掉一半 @ n=%zu (%.2f GB/s)", n, p->gbs_a);
+                std::printf("  halves at n=%zu (%.2f GB/s)", n, p->gbs_a);
                 break;
             }
         }
@@ -2283,8 +2471,9 @@ int main(int argc, char **argv)
     }
 
     if (!small.empty()) {
-        std::printf("\n--- 小 N 区制：ns/调用（batch A）与相对标量锚点的倍数 ---\n");
-        std::printf("%-6s", "op");
+        std::printf("\n--- small-N regime: ns/call (batch A) and the factor against the scalar "
+                    "anchor ---\n");
+        std::printf("%-24s", "op");
         for (size_t n : args.small_ns) std::printf(" %10zu", n);
         std::printf("\n");
         for (size_t k : sel) {
@@ -2293,7 +2482,7 @@ int main(int argc, char **argv)
             for (const SmallPt &s : small)
                 if (s.op == OPS[k].name) any = true;
             if (!any) continue;
-            std::printf("%-6s", OPS[k].name);
+            std::printf("%-24s", OPS[k].name);
             for (size_t n : args.small_ns) {
                 const SmallPt *f = nullptr;
                 for (const SmallPt &s : small)
@@ -2305,13 +2494,13 @@ int main(int argc, char **argv)
             }
             std::printf("\n");
         }
-        std::printf("\n--- 小 N 区制：A / scalar_loop 的加速比（>1 = 批量入口赢） ---\n");
-        std::printf("%-6s", "op");
+        std::printf("\n--- small-N regime: speedup A / scalar_loop (>1 = the batch entry wins) ---\n");
+        std::printf("%-24s", "op");
         for (size_t n : args.small_ns) std::printf(" %10zu", n);
         std::printf("\n");
         for (size_t k : sel) {
             if (!small_supported((int)k)) continue;
-            std::printf("%-6s", OPS[k].name);
+            std::printf("%-24s", OPS[k].name);
             for (size_t n : args.small_ns) {
                 const SmallPt *f = nullptr;
                 for (const SmallPt &s : small)
@@ -2335,16 +2524,19 @@ int main(int argc, char **argv)
             tr.push_back(p.trials);
         }
         std::sort(tr.begin(), tr.end());
-        std::printf("\n取样稳定性: 大 N 里配对 IQR < %.1f%%（=可分辨）的点 %zu/%zu（cold 不达标 %zu）；"
-                    "所需取样数 中位 %d 最大 %d\n",
+        std::printf("\nsampling stability: large-N points with paired IQR < %.1f%%\n"
+                    "(= resolvable): %zu/%zu (%zu cold below target); trials: median %d max %d\n",
                     args.cov_target, ok, tot, cold_bad, tr[tr.size() / 2], tr.back());
     }
 
     if (args.selfcheck) {
-        /* 判定规则分两类：
-         *   可分辨   = 两侧 CoV 都 <= 阈值 -> 比值必须落在 [0.85,1.15]，否则夹具判失败；
-         *   不可分辨 = 任一侧 CoV > 阈值（外部负载把这一档咬穿了）-> 照报数字，但不进判据。
-         * 另加一条护栏：可分辨点必须占多数，否则说明整台机器都不适合测量，一样判失败。 */
+        /* Two classes of points:
+         *   resolvable   = both CoV <= threshold -> the ratio must land in [0.85,1.15], else the
+         *                  fixture fails;
+         *   unresolvable = either CoV > threshold (external load burned a hole through this
+         *                  tier) -> numbers are still reported but never judged.
+         * One more guard: resolvable points must be the majority, otherwise the whole machine is
+         * unfit for measurement and the fixture fails as well. */
         std::vector<double> wr, cr;
         size_t bad_w = 0, bad_c = 0, unres_w = 0, unres_c = 0, resolvable_w = 0;
         for (const Pt &p : pts) {
@@ -2363,22 +2555,25 @@ int main(int argc, char **argv)
                 }
             }
         }
-        std::printf("\n自检（baseline vs baseline，比值必须落在 [%.2f, %.2f]）:\n", AB_BAND_LO,
+        std::printf("\nself-check (baseline vs baseline; ratios must fall in [%.2f, %.2f]):\n",
+                    AB_BAND_LO,
                     AB_BAND_HI);
         if (!wr.empty()) {
             std::sort(wr.begin(), wr.end());
-            std::printf("  warm: %zu 点  min=%.4f  p50=%.4f  max=%.4f  可分辨 %zu 超带 %zu  "
-                        "不可分辨 %zu\n",
+            std::printf("  warm: %zu pts  min=%.4f  p50=%.4f  max=%.4f  resolvable %zu  out of "
+                        "band %zu  unresolvable %zu\n",
                         wr.size(), wr.front(), wr[wr.size() / 2], wr.back(), resolvable_w, bad_w,
                         unres_w);
         }
         if (!cr.empty()) {
             std::sort(cr.begin(), cr.end());
-            std::printf("  cold: %zu 点  min=%.4f  p50=%.4f  max=%.4f  不可分辨 %zu 超带 %zu\n",
+            std::printf("  cold: %zu pts  min=%.4f  p50=%.4f  max=%.4f  unresolvable %zu  out of "
+                        "band %zu\n",
                         cr.size(), cr.front(), cr[cr.size() / 2], cr.back(), unres_c, bad_c);
         }
-        std::printf("  （不可分辨 = 两侧取样变异系数 > %.1f%%，外部负载把该档咬穿；这些点的\n"
-                    "    比值照报但**不作为判据**，它们的 GB/s 量级仍然可用）\n", args.cov_target);
+        std::printf("  (unresolvable = the sample CoV on either side > %.1f%%, external load burned "
+                    "through\n   that tier; these ratios are reported but **never judged**, their "
+                    "GB/s magnitude still is)\n", args.cov_target);
         std::vector<double> all = wr;
         all.insert(all.end(), cr.begin(), cr.end());
         std::sort(all.begin(), all.end());
@@ -2391,7 +2586,7 @@ int main(int argc, char **argv)
             while (b < 6 && v >= edges[b]) ++b;
             ++cnt[b];
         }
-        std::printf("  比值分布（大 N，warm+cold，共 %zu 点）:\n", all.size());
+        std::printf("  ratio distribution (large N, warm+cold, %zu pts):\n", all.size());
         for (int b = 0; b < 7; ++b) {
             std::printf("    %s %4zu  ", lbl[b], cnt[b]);
             for (size_t j = 0; j < cnt[b]; ++j) std::printf("#");
@@ -2405,27 +2600,36 @@ int main(int argc, char **argv)
                 ++bad_s;
             }
         }
-        /* 全点无偏性：240 个配对测下来，中位数必须贴着 1.0。这一条不受"个别点被噪声
-         * 咬穿"影响（中位数对尾部极不敏感），是比"每点都在带内"更硬的无偏性证据。 */
+        /* All-point unbiasedness: over 240 paired measurements the median has to hug 1.0.
+         * A few points burned through by noise do not move it (the median barely looks at the
+         * tails), which makes this harder evidence of unbiasedness than "every point in band". */
         std::vector<double> allr = wr;
         allr.insert(allr.end(), cr.begin(), cr.end());
         for (const SmallPt &s : small) allr.push_back(s.ratio);
         const double gm = allr.empty() ? 1.0 : median(allr);
-        std::printf("  全点中位比: %.4f（%zu 个配对测量，判据 [0.95, 1.05]）%s\n", gm,
-                    allr.size(), (gm >= 0.95 && gm <= 1.05) ? "  OK" : "  <== 超出");
-        /* 环境可用性下限：可分辨点若少到没有统计意义，本次结论不成立。5% 是"至少还有
-         * 几十个点能判"的下限；本机被外部负载占 30-50% 时通常只有 5-15% 的点可分辨。 */
-        /* 按规模看偏置：同一档里 15 个算子的比值中位数，是"这一档两侧是否等价"的
-         * 稳健估计（15 个样本的中位数，标准误约等于单点噪声的 1/4）。逐点的极端值
-         * 仍然照报，但"某一档整体偏了"这种夹具级故障一定会被这一行抓住。 */
-        /* 逐规模判据改成**地板制**：一档的比值中位数必须落在该档自己测出来的 A/A 地板
-         * p90 以内，而不是写死的 [0.90, 1.10]。地板是同一批运行里测的，比常数准。
-         * 兜底：该档地板本身 > 20% → 这一档不可判，标 INCONCLUSIVE（不 PASS 也不 FAIL）。
-         * 黑名单档（默认 131072，L3 边界，A/A 在 0.50–2.22）只记录、不参与判定。 */
-        std::printf("  逐规模中位比（warm / cold）—— 判据 = 该档实测 A/A 地板 p90（不再是写死的 "
-                    "[0.90,1.10]）:\n");
+        std::printf("  all-point median ratio: %.4f (%zu paired measurements, criterion "
+                    "[0.95, 1.05])%s\n",
+                    gm, allr.size(), (gm >= 0.95 && gm <= 1.05) ? "  OK" : "  <== outside");
+        /* Environment floor: if too few points are resolvable to mean anything, the run's
+         * conclusion does not hold. 5% is the "at least a few dozen points can still be
+         * judged" floor; with 30-50% external load this machine usually resolves only 5-15%. */
+        /* Bias per tier: the median ratio of the 15 ops in one tier is a robust estimate of
+         * "are the two sides equivalent in this tier" (median of 15 samples, standard error
+         * about 1/4 of the single-point noise). Per-point extremes are still reported, but a
+         * fixture-level fault such as "one tier drifted as a whole" is always caught here. */
+        /* The per-size criterion is **floor-based**: a tier's median ratio must sit inside the
+         * p90 of the A/A floor measured for that tier itself, not inside a hard-coded
+         * [0.90, 1.10]. A floor measured in the same runs beats a constant -- but it is still a
+         * finite-sample estimate and can come out far too small (0.3% was measured), so the
+         * floor actually applied is max(measured, AB_MIN_TIER_FLOOR).
+         * Fallback: floor > 20% means the tier cannot be judged and is tagged INCONCLUSIVE
+         * (neither PASS nor FAIL). Blacklisted tiers (default 131072, the L3 boundary where A/A
+         * runs 0.50-2.22) are recorded and never judged. */
+        std::printf("  per-size median ratio (warm / cold) -- criterion = that tier's\n"
+                    "  measured A/A floor p90 (no longer a hard-coded [0.90,1.10]):\n");
         bool size_bad = false;
         size_t tier_inconc = 0, tier_judged = 0;
+        std::vector<std::string> tier_fail; /* one line per tier that missed its floor */
         for (size_t n : args.sizes) {
             std::vector<double> vw, vc, fw, fc;
             for (const Pt &p : pts) {
@@ -2440,82 +2644,129 @@ int main(int argc, char **argv)
             const double flc = fc.empty() ? 0.0 : std::fabs(median(fc) - 1.0);
             const bool excluded = tier_excluded(n, args.tier_exclude);
             const char *tag = "";
+            char tagbuf[96];
             if (excluded) {
-                tag = "  [黑名单档：只记录 不判]";
+                tag = "  [blacklisted tier: recorded, not judged]";
             } else if (!have_floor) {
-                /* 没有同轮 A/A 数据（例如没开 --aa-each-round）：退回旧的常数带，并注明 */
+                /* no same-round A/A data (--aa-each-round was off): fall back to the old
+                 * constant band and say so */
                 const bool bad = !(mw >= 0.90 && mw <= 1.10) || !(mc >= 0.90 && mc <= 1.10);
                 if (bad) {
                     size_bad = true;
-                    tag = "  <== 该档整体偏离（无同轮 A/A，退回常数带）";
+                    tag = "  <== tier drifted overall (no same-round A/A, constant band used)";
                 }
             } else if (flw > 0.20 || flc > 0.20) {
                 ++tier_inconc;
-                tag = "  [地板 >20% → INCONCLUSIVE]";
+                tag = "  [floor >20% -> INCONCLUSIVE]";
             } else {
                 ++tier_judged;
-                const bool bw = std::fabs(mw - 1.0) > flw;
-                const bool bc = std::fabs(mc - 1.0) > flc;
+                /* Clamped floor: below AB_MIN_TIER_FLOOR the fixture's own reproducibility
+                 * dominates the ratio, so judging against the raw estimate only produces false
+                 * alarms (README section 8). The measured floor is still what gets printed. */
+                const double ew = std::max(flw, AB_MIN_TIER_FLOOR);
+                const double ec = std::max(flc, AB_MIN_TIER_FLOOR);
+                const bool bw = std::fabs(mw - 1.0) > ew;
+                const bool bc = std::fabs(mc - 1.0) > ec;
                 if (bw || bc) {
                     size_bad = true;
-                    tag = "  <== 该档中位比超出该档 A/A 地板";
+                    char d[224];
+                    std::snprintf(d, sizeof d,
+                                  "n=%zu: warm %+.2f%% (floor %.2f%% -> effective %.2f%%), "
+                                  "cold %+.2f%% (floor %.2f%% -> effective %.2f%%)",
+                                  n, 100.0 * (mw - 1.0), 100.0 * flw, 100.0 * ew,
+                                  100.0 * (mc - 1.0), 100.0 * flc, 100.0 * ec);
+                    tier_fail.push_back(d);
+                    if (ew > flw || ec > flc)
+                        std::snprintf(tagbuf, sizeof tagbuf,
+                                      "  <== outside the criterion (effective floor %.1f%%)",
+                                      100.0 * std::max(ew, ec));
+                    else
+                        std::snprintf(tagbuf, sizeof tagbuf, "  <== outside the criterion");
+                    tag = tagbuf;
                 }
             }
-            std::printf("    n=%-9zu warm %6.4f (地板 %5.3f, %2zu 点)   cold %6.4f (地板 %5.3f, "
-                        "%2zu 点)%s\n",
+            std::printf("    n=%-9zu warm %6.4f (floor %5.3f, %2zu pts)   cold %6.4f "
+                        "(floor %5.3f, %2zu pts)%s\n",
                         n, mw, flw, vw.size(), mc, flc, vc.size(), tag);
         }
-        std::printf("    -> 可判 %zu 档，INCONCLUSIVE %zu 档，黑名单 %s\n", tier_judged,
+        std::printf("    -> judged %zu tiers, INCONCLUSIVE %zu tiers, blacklist %s\n", tier_judged,
                     tier_inconc, args.tier_exclude.c_str());
         const size_t total_res = resolvable_w + bad_w + bad_s;
         const size_t total_all = resolvable_w + bad_w + unres_w + bad_s + unres_s;
         const bool env_bad = total_res * 20 < total_all;
         const bool bias_bad = !(gm >= 0.95 && gm <= 1.05);
         if (bad_w || bad_c || bad_s > 0) {
-            std::printf("  （逐点超带：warm %zu / cold %zu / 小N %zu。单点被『代码放置/页映射』这类\n"
-                        "    一次性因素影响，是这套 A/A 夹具已知的分辨率下限；判据建立在\n"
-                        "    『逐规模中位比』与『全点中位比』上，不在单点上。）\n",
+            std::printf("  (points out of band: warm %zu / cold %zu / small-N %zu. A single point can\n"
+                        "   be moved by one-off effects such as code placement or page mapping; "
+                        "that\n   is the known resolution limit of this A/A fixture. The "
+                        "criterion rests on\n   the per-size and all-point median ratios, not on "
+                        "single points.)\n",
                         bad_w, bad_c, bad_s);
         }
         if (env_bad || bias_bad || size_bad) {
             std::printf("\n");
             std::printf("#####################################################################\n");
-            std::printf("## 自检失败：%s%s%s\n",
-                        env_bad ? "可分辨点太少（<5%）" : "",
-                        bias_bad ? "全点中位比偏离 1.0 超 5%（系统性偏置）" : "",
-                        size_bad ? "存在超出该档 A/A 地板的规模档" : "");
-            std::printf("## 可分辨 %zu/%zu，loadavg=%.2f。夹具或环境不可用，本次所有比值作废。\n",
-                        total_res, total_all, loadavg1());
+            if (env_bad || bias_bad) {
+                /* These two are genuinely run-level properties: without enough resolvable
+                 * points, or with a systematic bias, no ratio of this run can be judged. */
+                std::printf("## self-check failed: %s%s\n",
+                            env_bad ? "too few resolvable points (<5%) " : "",
+                            bias_bad ? "all-point median ratio is more than 5% off 1.0 "
+                                       "(systematic bias)" : "");
+                std::printf("## resolvable %zu/%zu, loadavg=%.2f. A run in this state cannot be\n"
+                            "## judged: re-run before using any ratio from it.\n",
+                            total_res, total_all, loadavg1());
+            } else {
+                /* A tier-level miss is local evidence, not proof that the run is unusable. */
+                std::printf("## self-check failed: tier-level deviation from the tier criterion\n");
+                for (const std::string &t : tier_fail)
+                    std::printf("##   %s\n", t.c_str());
+                std::printf("## deviation = tier median ratio - 1; floor = that tier's measured A/A\n"
+                            "## p90; effective floor = max(measured, %.0f%%) (see section 8 of\n"
+                            "## bench/ab/README.md).\n",
+                            100.0 * AB_MIN_TIER_FLOOR);
+                std::printf("## The tier(s) listed above are not judged. The other tiers of this\n"
+                            "## run stand and their numbers stay usable.\n");
+            }
             std::printf("#####################################################################\n");
             verdict = 3;
         } else {
-            std::printf("  结论: 夹具自检通过 —— 逐规模中位比与全点中位比都在带内，"
-                        "同代码两侧无系统性差异。\n");
+            std::printf("  verdict: fixture self-check passed -- the per-size and the all-point\n"
+                        "           median ratios are both in band, so identical code shows no\n"
+                        "           systematic difference between the two sides.\n");
         }
     } else {
-        std::printf("\n判据提醒：本项目的加速比门槛 >= 1.15x，且必须与工作集大小一起报。\n");
+        std::printf("\ncriterion reminder: this project's speedup threshold is >= 1.15x and must "
+                    "always be reported together with the working-set size.\n");
     }
 
-    /* ================= 落盘 ================= */
+    /* ================= writing the artifacts ================= */
     if (!args.tsv_out.empty()) {
         FILE *f = std::fopen(args.tsv_out.c_str(), "w");
         if (!f) {
-            std::fprintf(stderr, "无法写入 %s\n", args.tsv_out.c_str());
+            std::fprintf(stderr, "cannot write %s\n", args.tsv_out.c_str());
             return 2;
         }
-        std::fprintf(f, "# flashvec 同进程 A/B 交错夹具  label=%s\n", args.label.c_str());
-        std::fprintf(f, "# git_rev=%s  baseline=git HEAD 快照  candidate=%s\n", AB_GIT_REV,
+        std::fprintf(f, "# flashvec in-process A/B interleaving fixture  label=%s\n",
+                     args.label.c_str());
+        std::fprintf(f, "# git_rev=%s  baseline=git HEAD snapshot  candidate=%s\n", AB_GIT_REV,
                      AB_CAND_DESC);
-        std::fprintf(f, "# 机器=AMD Ryzen 7 5700U 8C/16T AVX2 无AVX-512; L1d 32KiB L2 512KiB "
-                        "L3 4MiB/CCX; governor=performance %.0f-%.0f MHz 未固定; 单线程 taskset 绑核\n",
+        std::fprintf(f, "# machine=AMD Ryzen 7 5700U 8C/16T AVX2 no AVX-512; L1d 32KiB L2 512KiB "
+                        "L3 4MiB/CCX; governor=performance %.0f-%.0f MHz not pinned; "
+                        "single-threaded, taskset pinned\n",
                      mn0, mx0);
-        std::fprintf(f, "# 口径: gbs=(rd+wr)/ns_per_elem; pct_memcpy=该点 GB/s / 同规模同 phase 的 memcpy GB/s\n");
-        std::fprintf(f, "# RFO 记账: real_gbs=(rd + real_wr)/ns_per_elem，real_wr=wr*(普通 store 2x / NT 1x / "
-                        "就地 1x)；rfo 见 --list-ops，mixed?/libc? = 不确定 已标注\n");
-        std::fprintf(f, "# ratio=median(每轮 A/B)（主判据）；ratio_medAB=median(A)/median(B)。>1 表示 candidate 更快\n");
-        std::fprintf(f, "# warm=已驻留缓冲区重复跑；cold=madvise(DONTNEED) 后单次调用（含 minor page fault）\n");
+        std::fprintf(f, "# accounting: gbs=(rd+wr)/ns_per_elem; pct_memcpy=this point's GB/s / "
+                        "same-size same-phase memcpy GB/s\n");
+        std::fprintf(f, "# RFO accounting: real_gbs=(rd + real_wr)/ns_per_elem where real_wr=wr*"
+                        "(plain store 2x / NT 1x / in-place 1x); rfo per op: --list-ops; "
+                        "mixed?/libc? = uncertain, flagged as such\n");
+        std::fprintf(f, "# ratio=median(per-round A/B) (main criterion); ratio_medAB=median(A)/"
+                        "median(B). >1 means the candidate is faster\n");
+        std::fprintf(f, "# warm=repeated runs on resident buffers; cold=one call after "
+                        "madvise(DONTNEED), minor page faults included\n");
         std::fprintf(f, "# clock=%s\n", g_clock_name);
-        std::fprintf(f, "# 每点取样 >= %d 次，到 CoV<%.1f%% 或上限 %d 次\n", args.trials_min,
+        std::fprintf(f, "# trials per point >= %d, until CoV<%.1f%% or the cap %d\n",
+                     args.trials_min,
                      args.cov_target, args.trials_max);
         std::fprintf(f, "phase\top\tn\tworkingset_bytes\trd_bytes\twr_bytes\ttier\tgbs_a\tgbs_b\t"
                         "pct_memcpy_a\tpct_memcpy_b\ta_median_ns_per_elem\tb_median_ns_per_elem\t"
@@ -2526,7 +2777,11 @@ int main(int argc, char **argv)
                         "real_gbs_b\treal_pct_memcpy_a\treal_pct_memcpy_b\trfo\t"
                         "aa_n\taa_p50\taa_p90\taa_max\taa_dev_max\tmode\tref_op\n");
         for (const Pt &p : pts) {
-            const size_t ws = (p.rd + p.wr) * p.n;
+            /* Byte volume = per-element bytes x element count. A wide element (12 B / 16 B) has
+             * nel() elements per sweep slot, not n: using n here overstates ws by 12/8 or 16/8
+             * and can push the tier label across a boundary (the console path already uses
+             * nel(); this is the same rule). */
+            const size_t ws = (p.rd + p.wr) * nel(OPS[p.opi], p.n);
             std::fprintf(f,
                          "%s\t%s\t%zu\t%zu\t%zu\t%zu\t%s\t%.4f\t%.4f\t%.1f\t%.1f\t%.6f\t%.6f\t"
                          "%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.2f\t%.2f\t%.2f\t%d\t"
@@ -2550,13 +2805,16 @@ int main(int argc, char **argv)
     if (!args.small_out.empty() && !small.empty()) {
         FILE *f = std::fopen(args.small_out.c_str(), "w");
         if (!f) {
-            std::fprintf(stderr, "无法写入 %s\n", args.small_out.c_str());
+            std::fprintf(stderr, "cannot write %s\n", args.small_out.c_str());
             return 2;
         }
-        std::fprintf(f, "# flashvec 小 N 区制（调用开销）label=%s rev=%s candidate=%s\n",
+        std::fprintf(f, "# flashvec small-N regime (call overhead) label=%s rev=%s "
+                        "candidate=%s\n",
                      args.label.c_str(), AB_GIT_REV, AB_CAND_DESC);
-        std::fprintf(f, "# ns/call 是瓶颈指标；scalar_loop = 逐元素调标量 API（重构前锚点，跨 TU 不可内联）\n");
-        std::fprintf(f, "# A_scalar_x = ns/call(scalar) / ns/call(A)，>1 表示批量入口更快\n");
+        std::fprintf(f, "# ns/call is the bottleneck metric; scalar_loop = element-wise scalar API "
+                        "(the pre-refactor anchor, never inlined across a TU boundary)\n");
+        std::fprintf(f, "# A_scalar_x = ns/call(scalar) / ns/call(A); >1 means the batch entry is "
+                        "faster\n");
         std::fprintf(f, "n\top\tcalls\tns_per_call_a\tns_per_call_b\tns_per_call_scalar\t"
                         "ns_per_elem_a\tns_per_elem_b\tratio_A_over_B\tA_over_scalar\ta_cov_pct\t"
                         "b_cov_pct\ttrials\tchecksum\n");
@@ -2574,14 +2832,15 @@ int main(int argc, char **argv)
     if (!args.matrix_out.empty()) {
         FILE *f = std::fopen(args.matrix_out.c_str(), "w");
         if (!f) {
-            std::fprintf(stderr, "无法写入 %s\n", args.matrix_out.c_str());
+            std::fprintf(stderr, "cannot write %s\n", args.matrix_out.c_str());
             return 2;
         }
-        std::fprintf(f, "# flashvec 吞吐矩阵 baseline 快照  label=%s rev=%s candidate=%s\n",
+        std::fprintf(f, "# flashvec throughput matrix, baseline snapshot  label=%s rev=%s "
+                        "candidate=%s\n",
                      args.label.c_str(), AB_GIT_REV, AB_CAND_DESC);
-        std::fprintf(f, "# 每行 (phase, metric, op)，列是规模；metric: gbs=名义 GB/s, "
-                        "real_gbs=RFO 记账后的真实 GB/s, pct_memcpy=占同规模 memcpy 百分比, "
-                        "ratio=median(每轮 A/B)\n");
+        std::fprintf(f, "# each row is (phase, metric, op), the columns are the sizes; metric: "
+                        "gbs=nominal GB/s, real_gbs=real GB/s after RFO accounting, "
+                        "pct_memcpy=percent of same-size memcpy, ratio=median(per-round A/B)\n");
         std::fprintf(f, "phase\tmetric\top");
         for (size_t n : args.sizes) std::fprintf(f, "\tn%zu", n);
         std::fprintf(f, "\n");
@@ -2615,17 +2874,23 @@ int main(int argc, char **argv)
     if (!args.floor_out.empty()) {
         FILE *f = std::fopen(args.floor_out.c_str(), "w");
         if (!f) {
-            std::fprintf(stderr, "无法写入 %s\n", args.floor_out.c_str());
+            std::fprintf(stderr, "cannot write %s\n", args.floor_out.c_str());
             return 2;
         }
-        std::fprintf(f, "# A/A 地板表（fixture resolution floor）  label=%s rev=%s candidate=%s\n",
+        std::fprintf(f, "# A/A floor table (fixture resolution floor)  label=%s rev=%s "
+                        "candidate=%s\n",
                      args.label.c_str(), AB_GIT_REV, AB_CAND_DESC);
-        std::fprintf(f, "# 只有两侧源码**相同**的构建（SELFCHECK / candidate=git HEAD 快照）本表才成立；\n");
-        std::fprintf(f, "# 本表是对应构建的 A/A 自检结果：同一份代码、两个 TU、同一进程交替跑出来的比值。\n");
-        std::fprintf(f, "# 用法：任何「候选比基线快 r 倍」的结论，只有 (r-1) > floor_dev 才可能为真；\n");
-        std::fprintf(f, "#       resolvable=0 的点（配对 IQR >= %.1f%%）连地板都测不准，不要拿它判。\n",
+        std::fprintf(f, "# valid only for builds where both sides are **the same** source "
+                        "(SELFCHECK / candidate=git HEAD snapshot);\n");
+        std::fprintf(f, "# it is the A/A self-check of that build: ratios of the same code, two "
+                        "TUs, interleaved inside one process.\n");
+        std::fprintf(f, "# usage: a claim that the candidate is r times faster can only be true "
+                        "when (r-1) > floor_dev;\n");
+        std::fprintf(f, "#        a resolvable=0 point (paired IQR >= %.1f%%) cannot even measure the "
+                        "floor, so never judge with it.\n",
                      args.cov_target);
-        std::fprintf(f, "# floor_dev=|ratio-1|；in_band=比值落在 [%.2f,%.2f]；rfo 见 --list-ops\n",
+        std::fprintf(f, "# floor_dev=|ratio-1|; in_band=the ratio falls in [%.2f,%.2f]; rfo: "
+                        "--list-ops\n",
                      AB_BAND_LO, AB_BAND_HI);
         std::fprintf(f, "phase\top\tn\tratio\tpair_iqr_pct\ttrials\tresolvable\tfloor_dev\t"
                         "in_band\trfo_flags\n");

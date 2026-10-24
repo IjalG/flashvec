@@ -57,6 +57,10 @@ before anything else, and turn on `-fno-math-errno` at the same time.
 **Do not** start with hand-written intrinsics, do not switch to double, do not introduce templates or a pure
 SoA contract.
 
+**Added after this report was written**: §2.2 records the measurements for the fused, in-place and
+three-operand entry points. They confirm the inference §2 ends with — at large sizes the lever is
+traffic, and fusing three passes into one is worth 2.43-2.55x at n=1M and 2.53-2.63x at n=8M.
+
 ---
 
 ## 1. How This Report Came About (Read This First for Credibility)
@@ -230,6 +234,90 @@ Two criteria follow, and `bench/ab`'s reading rules are written from them:
    **24/16 = 1.500**.
    Measured PASS points are 1.29–1.58x, and paired 4M-tier IQRs are 66–98%; **a single point exceeding the
    ceiling by less than 20% is noise**. See `docs/acceptance-protocol.md` §9.
+
+### 2.2 Fusion: the Lever That Is Actually Left at Large Sizes
+
+§2 ends with an inference: once the working set is in the millions, changing instructions buys
+nothing and the only lever is memory traffic. This section is that inference measured, and it is
+where the library's fused, in-place and three-operand entries come from.
+
+The entries, with the full contract beside each declaration in `include/flashvec.h`:
+
+| Entry | Expression |
+|---|---|
+| `fv_vec2_madd_normalize_soa` | `out = normalize(a*s + b)`, one pass |
+| `fv_vec2_addmul_x4` / `_soa`, `fv_vec3_addmul_soa`, `fv_vec4_addmul_x2` | `x += v*s`, in place |
+| `fv_vec2_maddv_x4` | `o = a*b + c` — three vector operands; `madd`'s third operand is a scalar |
+
+Byte accounting decides what each one can be worth, and it is counted per entry shape:
+
+| Entry | Real B/element | The two-call workaround | Ceiling |
+|---|---|---|---|
+| fused `normalize(a*s+b)` | 32 (read a and b 16 + write 8 + RFO 8) | 80 (three passes) | 80/32 = 2.5x |
+| in-place `addmul` | 24 (read v 8 + read x 8 + write 8; the store hits the line the read owns, so no RFO) | 56 (`scale` 24 + `add` 32) | 56/24 = 2.33x |
+| `maddv` | 40 (a, b, c 24 + write 8 + RFO 8) | 64 (two passes, each paying its own RFO) | 64/40 = 1.60x |
+| `maddv` with `_stream` | 32 (the same, RFO dropped) | 64 | 64/32 = 2.00x |
+
+The two workarounds do not carry the same baseline: quoting 56 B for both would understate `maddv`.
+
+The denominator first, because every ratio below is a fraction of it. `bench/membw.c`, one thread,
+taskset-pinned, best of 5:
+
+| Working set | triad | triad16 (with RFO) | read | memcpy |
+|---|---|---|---|---|
+| 96 MB | 7.88 GB/s | 10.51 GB/s | 13.28 GB/s | 12.93 GB/s |
+| 48 MB | 9.16 GB/s | 12.21 GB/s | 14.31 GB/s | 14.31 GB/s |
+
+`triad` counts logical bytes, 12 B/element; `triad16` is the same run with the write's
+read-for-ownership allocated in, 16 B/element. These readings are higher than the 6.0–6.9 GB/s
+three-stream figure quoted in §2 — both come from `bench/membw.c`, and this section quotes the
+newer run.
+
+The element-wise baseline: `fv_vec2_add_x4` on a 96 MB working set runs at **3.33 ns/element**,
+about **9.6-10.3 GB/s** against a machine triad16 ceiling of 10.51 GB/s at the same 96 MB working set -- **91-98%** of it. That is the number worth
+planning against: at that size a batch entry point is already near the wall, and no amount of
+instruction work moves it.
+
+Measured, with the harness this report has used throughout — single thread, taskset-pinned, the
+default tier `-O3 -fno-math-errno -ffp-contract=off` **without `-march`**, alternating A/B inside
+one process:
+
+| Change | n=8192 | n=1M | n=8M | A/A floor |
+|---|---|---|---|---|
+| `_stream` vs an ordinary store | — | 1.48–1.60x | 1.54–1.60x | 0.97–1.07 |
+| fused `normalize(a*s+b)` vs three calls | 1.73x | 2.43–2.55x | 2.53–2.63x | — |
+| the same, plus `_stream` | 1.68x | **3.53–3.68x** | **3.72–3.78x** | — |
+| in-place `x += v*s` vs `scale` then `add` | 1.06–2.18x | 2.05–2.17x | 1.92–2.03x | 0.97–1.06 |
+| `maddv` vs `mul` then `add` | 1.60–1.67x | 1.61–1.79x | 1.59–1.76x | ~1.00 |
+| `maddv_stream` vs `mul` then `add` | 1.16–1.37x | 2.16–2.23x | **2.34–2.41x** | ~1.00 |
+
+The floor belongs beside every row because each row is a ratio between two different bodies of code:
+when the floor itself reads 0.97–1.07, a 1.06x row carries no information.
+
+Reproduction: the `addmul` and `maddv` rows are `make bench-addmul`; the fused row is a separate
+round on the same harness; the bit-level identity claim is `make test-maddnorm`, which compares
+against the stepwise calls with `memcmp`.
+
+Three limits, and they are the part that gets lost:
+
+1. **`_stream` is slower at small sizes — not slightly, 2–8 times** (0.13–0.37 at n=8192). An NT
+   store bypasses the cache, so inside L2 it has no RFO to save and loses the cache hit as well.
+   Use it only when the working set is at least L3, 4 MiB per CCX.
+2. **`maddv_stream` at n=8192 is faster relative and slower absolute**: 1.16–1.37x against the
+   two-pass workaround, but 0.99 ns/element against 0.58 for the non-stream form. Inside L2 the
+   non-stream form is the one to call; that ratio only says "still faster than two passes".
+3. **The byte account is a ceiling, and 20% above it is noise.** `add` / `sub` / `lerp` /
+   `madd` top out at 32/24 = 1.33x, `scale` / `normalize` / the matrix transform at 1.50x,
+   in-place `addmul` at 2.33x, `maddv` at 1.60x and `maddv_stream` at 2.00x. The `_stream`
+   row reads 1.48–1.60x, above the 1.33x ceiling for the `add` family; that excess is real — an
+   NT store also keeps the output from polluting the cache — and the account above does not count
+   it. Do not turn a single point into "above the theoretical limit".
+
+What this means for the plan: §2's inference said that at millions of elements the only lever left
+is reducing memory traffic. That lever now has two concrete forms. Fuse the element-wise passes.
+Stop writing the output into the cache when it is not read back. The first works at every size and
+is the larger win; the second only above L3. Neither reaches a reduction: changing the order of a
+`dot` changes its result, which is the §3.4 point again.
 
 ---
 

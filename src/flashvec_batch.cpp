@@ -1,15 +1,19 @@
-/* flashvec 批量入口的库内定义（P1 重构后）：实现只有一份，在 include/flashvec.h。
+/* In-library definitions of the flashvec batch entry points (after the P1 refactor): there is one implementation only, in include/flashvec.h.
  *
- * 本文件只做两件事：
- *   1) 用 FV_BUILD 把头文件切成「只有声明」的形态：公开名在头文件里是 extern，
- *      实现小节仍然编译（那一节由 !FV_USE_EXTERN 控制，FV_BUILD 不排除它）；
- *   2) 为 33 个批量入口各给一个 extern 符号，函数体一行转发到同名 fv_i_*。
+ * This file does three things:
+ *   1) use FV_BUILD to turn the header into its "declarations only" form: the public names are extern in the header,
+ *      while the implementation section still compiles (that section is controlled by !FV_USE_EXTERN, and FV_BUILD does not exclude it);
+ *   2) give each batch entry point an extern symbol whose one-line body forwards to the same-named fv_i_*;
+ *   3) define the four per-value integrator primitives (fv_vec2_addmul / fv_vec3_addmul / fv_vec4_addmul / fv_vec2_maddv).
+ *      They are scalar API, so they belong in the library rather than in the header; they live at the end of this file
+ *      because this is the in-library unit that the integrator group touches, and they carry the same fp-contract=off
+ *      pragma the other scalar definitions carry (src/flashvec.cpp, src/flashvec_vec4.cpp).
  *
- * 为什么还留这些符号：二进制兼容。旧消费方（已经编译好、调用 extern 的 .o/.so）继续能链；
- * 新消费方默认拿头文件里的 static inline，链接时不会引用这些符号。
+ * Why these symbols remain: binary compatibility. Old consumers (already-built .o/.so files calling the extern names) keep linking;
+ * new consumers get the header's static inline by default and never reference these symbols at link time.
  *
- * 位级一致性、掩码/索引/尾长语义、intrinsics 的出现条件都写在 include/flashvec.h 的
- * 「批量入口（P1）」契约注释与文件头里；这里不复制第二份说明，避免两处说法漂移。
+ * Bit-exactness, the mask / index / tail-length semantics and the conditions under which intrinsics appear are all written in
+ * include/flashvec.h's "batch entry points (P1)" contract and file header; no second copy is made here, so the two cannot drift apart.
  */
 
 #define FV_BUILD 1
@@ -95,9 +99,9 @@ void fv_vec2_normalize_soa(const float *__restrict ax, const float *__restrict a
     fv_i_normalize_soa(ax, ay, ox, oy, n);
 }
 
-/* ---------------- 内存流量优化入口（P2）：同样只做转发 ----------------
- * NT store 的对齐 peel、sfence、掩码语义全在 include/flashvec.h 的内核里；
- * 这里给 extern 符号是为了让 FV_USE_EXTERN 形态（以及已编译好的旧消费方）能链到同一份实现。 */
+/* ---------------- memory-traffic entry points (P2): forwarding only, as above ----------------
+ * The NT store's alignment peel, its sfence and the mask semantics all live in the include/flashvec.h kernels;
+ * the extern symbols here let the FV_USE_EXTERN form (and already-built old consumers) link to that same implementation. */
 void fv_vec2_add_x4_stream(const fv_vec2 *__restrict a, const fv_vec2 *__restrict b,
                            fv_vec2 *__restrict o, size_t n)
 {
@@ -114,6 +118,18 @@ void fv_vec2_scale_x4_stream(const fv_vec2 *__restrict a, fv_real s,
                              fv_vec2 *__restrict o, size_t n)
 {
     fv_i_scale_x4_stream(a, s, o, n);
+}
+
+void fv_vec2_lerp_x4_stream(const fv_vec2 *__restrict a, const fv_vec2 *__restrict b,
+                            fv_real t, fv_vec2 *__restrict o, size_t n)
+{
+    fv_i_lerp_x4_stream(a, b, t, o, n);
+}
+
+void fv_vec2_madd_x4_stream(const fv_vec2 *__restrict a, const fv_vec2 *__restrict b,
+                            fv_real s, fv_vec2 *__restrict o, size_t n)
+{
+    fv_i_madd_x4_stream(a, b, s, o, n);
 }
 
 void fv_vec2_add_soa_stream(const float *__restrict ax, const float *__restrict ay,
@@ -135,15 +151,32 @@ void fv_vec2_normalize_soa_stream(const float *__restrict ax, const float *__res
     fv_i_normalize_soa_stream(ax, ay, ox, oy, n);
 }
 
+/* ---------------- fused pipeline (out = normalize(a * s + b) in one pass): forwarding only, as above ----------------
+ * The evaluation order, the zero-vector mask and the NT store convention live in include/flashvec.h; this pair exists so the
+ * FV_USE_EXTERN form and already-built consumers reach the same implementation. */
+void fv_vec2_madd_normalize_soa(const float *__restrict ax, const float *__restrict ay,
+                                const float *__restrict bx, const float *__restrict by,
+                                fv_real s, float *__restrict ox, float *__restrict oy, size_t n)
+{
+    fv_i_madd_norm_soa(ax, ay, bx, by, s, ox, oy, n);
+}
+
+void fv_vec2_madd_normalize_soa_stream(const float *__restrict ax, const float *__restrict ay,
+                                       const float *__restrict bx, const float *__restrict by,
+                                       fv_real s, float *__restrict ox, float *__restrict oy, size_t n)
+{
+    fv_i_madd_norm_soa_stream(ax, ay, bx, by, s, ox, oy, n);
+}
+
 void fv_vec2_add_x4_mask_inplace(fv_vec2 *__restrict a, const fv_vec2 *__restrict b,
                                  const uint8_t *__restrict mask, size_t n)
 {
     fv_i_add_x4_mask_inplace(a, b, mask, n);
 }
 
-/* ---------------- 三维 SoA / 四维 _x2、_soa（P3）：同样只做转发 ----------------
- * 三维只有 SoA 形态（fv_vec3 保持 12 B、不加 padding），四维 AoS 用 _x2（2 个 16 B 元素 =
- * 一个 ymm）。内核、尾部、位级一致性、分段归档全在 include/flashvec.h 里，这里不复制说明。 */
+/* ---------------- 3D SoA / 4D _x2 and _soa (P3): forwarding only, as above ----------------
+ * 3D has SoA only (fv_vec3 stays 12 B with no padding added) and 4D AoS uses _x2 (2 x 16 B elements =
+ * one ymm). The kernels, tails, bit-exactness and sectioning are all in include/flashvec.h; no copy of the notes is made here. */
 void fv_vec3_add_soa(const float *__restrict ax, const float *__restrict ay,
                      const float *__restrict az,
                      const float *__restrict bx, const float *__restrict by,
@@ -158,6 +191,24 @@ void fv_vec3_scale_soa(const float *__restrict ax, const float *__restrict ay,
                        float *__restrict ox, float *__restrict oy, float *__restrict oz, size_t n)
 {
     fv_i_v3_scale_soa(ax, ay, az, s, ox, oy, oz, n);
+}
+
+void fv_vec3_add_soa_stream(const float *__restrict ax, const float *__restrict ay,
+                            const float *__restrict az,
+                            const float *__restrict bx, const float *__restrict by,
+                            const float *__restrict bz,
+                            float *__restrict ox, float *__restrict oy,
+                            float *__restrict oz, size_t n)
+{
+    fv_i_v3_add_soa_stream(ax, ay, az, bx, by, bz, ox, oy, oz, n);
+}
+
+void fv_vec3_scale_soa_stream(const float *__restrict ax, const float *__restrict ay,
+                              const float *__restrict az, fv_real s,
+                              float *__restrict ox, float *__restrict oy,
+                              float *__restrict oz, size_t n)
+{
+    fv_i_v3_scale_soa_stream(ax, ay, az, s, ox, oy, oz, n);
 }
 
 float fv_vec3_dot_soa(const float *__restrict ax, const float *__restrict ay,
@@ -180,6 +231,14 @@ void fv_vec3_normalize_soa(const float *__restrict ax, const float *__restrict a
                            size_t n)
 {
     fv_i_v3_normalize_soa(ax, ay, az, ox, oy, oz, n);
+}
+
+void fv_vec3_normalize_soa_stream(const float *__restrict ax, const float *__restrict ay,
+                                  const float *__restrict az,
+                                  float *__restrict ox, float *__restrict oy,
+                                  float *__restrict oz, size_t n)
+{
+    fv_i_v3_normalize_soa_stream(ax, ay, az, ox, oy, oz, n);
 }
 
 void fv_vec4_add_x2(const fv_vec4 *__restrict a, const fv_vec4 *__restrict b,
@@ -211,6 +270,36 @@ void fv_vec4_madd_x2(const fv_vec4 *__restrict a, const fv_vec4 *__restrict b, f
     fv_i_v4_madd_x2(a, b, s, o, n);
 }
 
+void fv_vec4_add_x2_stream(const fv_vec4 *__restrict a, const fv_vec4 *__restrict b,
+                           fv_vec4 *__restrict o, size_t n)
+{
+    fv_i_v4_add_x2_stream(a, b, o, n);
+}
+
+void fv_vec4_sub_x2_stream(const fv_vec4 *__restrict a, const fv_vec4 *__restrict b,
+                           fv_vec4 *__restrict o, size_t n)
+{
+    fv_i_v4_sub_x2_stream(a, b, o, n);
+}
+
+void fv_vec4_scale_x2_stream(const fv_vec4 *__restrict a, fv_real s,
+                             fv_vec4 *__restrict o, size_t n)
+{
+    fv_i_v4_scale_x2_stream(a, s, o, n);
+}
+
+void fv_vec4_lerp_x2_stream(const fv_vec4 *__restrict a, const fv_vec4 *__restrict b, fv_real t,
+                            fv_vec4 *__restrict o, size_t n)
+{
+    fv_i_v4_lerp_x2_stream(a, b, t, o, n);
+}
+
+void fv_vec4_madd_x2_stream(const fv_vec4 *__restrict a, const fv_vec4 *__restrict b, fv_real s,
+                            fv_vec4 *__restrict o, size_t n)
+{
+    fv_i_v4_madd_x2_stream(a, b, s, o, n);
+}
+
 float fv_vec4_dot_soa(const float *__restrict ax, const float *__restrict ay,
                       const float *__restrict az, const float *__restrict aw,
                       const float *__restrict bx, const float *__restrict by,
@@ -233,3 +322,121 @@ void fv_vec4_normalize_soa(const float *__restrict ax, const float *__restrict a
 {
     fv_i_v4_normalize_soa(ax, ay, az, aw, ox, oy, oz, ow, n);
 }
+
+void fv_vec4_normalize_soa_stream(const float *__restrict ax, const float *__restrict ay,
+                                  const float *__restrict az, const float *__restrict aw,
+                                  float *__restrict ox, float *__restrict oy,
+                                  float *__restrict oz, float *__restrict ow, size_t n)
+{
+    fv_i_v4_normalize_soa_stream(ax, ay, az, aw, ox, oy, oz, ow, n);
+}
+
+void fv_mat4_transform_points(const fv_mat4 *__restrict m, const fv_vec4 *__restrict in,
+                              fv_vec4 *__restrict out, size_t n)
+{
+    fv_i_mat4_tf_points(m, in, out, n);
+}
+
+void fv_mat4_transform_dirs(const fv_mat4 *__restrict m, const fv_vec4 *__restrict in,
+                            fv_vec4 *__restrict out, size_t n)
+{
+    fv_i_mat4_tf_dirs(m, in, out, n);
+}
+
+void fv_mat4_transform_points_stream(const fv_mat4 *__restrict m, const fv_vec4 *__restrict in,
+                                     fv_vec4 *__restrict out, size_t n)
+{
+    fv_i_mat4_tf_points_stream(m, in, out, n);
+}
+
+void fv_mat4_transform_dirs_stream(const fv_mat4 *__restrict m, const fv_vec4 *__restrict in,
+                                   fv_vec4 *__restrict out, size_t n)
+{
+    fv_i_mat4_tf_dirs_stream(m, in, out, n);
+}
+
+void fv_vec2_addmul_x4(fv_vec2 *__restrict x, const fv_vec2 *__restrict v, fv_real s, size_t n)
+{
+    fv_i_addmul_x4(x, v, s, n);
+}
+
+void fv_vec2_addmul_soa(float *__restrict x, float *__restrict y,
+                        const float *__restrict vx, const float *__restrict vy, fv_real s,
+                        size_t n)
+{
+    fv_i_addmul_soa(x, y, vx, vy, s, n);
+}
+
+void fv_vec3_addmul_soa(float *__restrict x, float *__restrict y, float *__restrict z,
+                        const float *__restrict vx, const float *__restrict vy,
+                        const float *__restrict vz, fv_real s, size_t n)
+{
+    fv_i_addmul_v3_soa(x, y, z, vx, vy, vz, s, n);
+}
+
+void fv_vec4_addmul_x2(fv_vec4 *__restrict x, const fv_vec4 *__restrict v, fv_real s, size_t n)
+{
+    fv_i_v4_addmul_x2(x, v, s, n);
+}
+
+void fv_vec2_maddv_x4(const fv_vec2 *__restrict a, const fv_vec2 *__restrict b,
+                      const fv_vec2 *__restrict c, fv_vec2 *__restrict o, size_t n)
+{
+    fv_i_maddv_x4(a, b, c, o, n);
+}
+
+void fv_vec2_maddv_x4_stream(const fv_vec2 *__restrict a, const fv_vec2 *__restrict b,
+                             const fv_vec2 *__restrict c, fv_vec2 *__restrict o, size_t n)
+{
+    fv_i_maddv_x4_stream(a, b, c, o, n);
+}
+
+/* The per-value half of the integrator primitives (fv_vec2_addmul / fv_vec3_addmul / fv_vec4_addmul / fv_vec2_maddv).
+ * They are scalar API and therefore in-library symbols, exactly like fv_vec2_add / fv_vec2_madd; they are defined in this
+ * unit because it is the one in-library unit this group touches, and they carry the same fp-contract=off pragma the other
+ * scalar definitions carry -- a consumer built with -mfma -ffp-contract=fast still links the unfused bit pattern. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize ("fp-contract=off")
+#endif
+
+fv_vec2 fv_vec2_addmul(fv_vec2 x, fv_vec2 v, fv_real s)
+{
+    fv_vec2 r;
+    r.x = x.x + v.x * s;
+    r.y = x.y + v.y * s;
+    return r;
+}
+
+fv_vec3 fv_vec3_addmul(fv_vec3 x, fv_vec3 v, fv_real s)
+{
+    fv_vec3 r;
+    r.x = x.x + v.x * s;
+    r.y = x.y + v.y * s;
+    r.z = x.z + v.z * s;
+    return r;
+}
+
+fv_vec4 fv_vec4_addmul(fv_vec4 x, fv_vec4 v, fv_real s)
+{
+    fv_vec4 r;
+    r.x = x.x + v.x * s;
+    r.y = x.y + v.y * s;
+    r.z = x.z + v.z * s;
+    r.w = x.w + v.w * s;
+    return r;
+}
+
+/* a*b + c, product first, then the sum -- the third operand is a vector here, which is the whole point (fv_vec2_madd's
+ * third operand is a scalar). */
+fv_vec2 fv_vec2_maddv(fv_vec2 a, fv_vec2 b, fv_vec2 c)
+{
+    fv_vec2 r;
+    r.x = a.x * b.x + c.x;
+    r.y = a.y * b.y + c.y;
+    return r;
+}
+
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif

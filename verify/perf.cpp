@@ -7,8 +7,12 @@
  *   - 输入 a / b 是不可变输入，任何被计时实现都不写它们（全部是 out-of-place 的 o = f(a,b)）；
  *   - 输出缓冲 o 在使用前清零，从不当输入；
  *   - 校验和 = **单次调用**的输出累加（与 iters 无关）；
- *   - 每个 op 内，除 dot_soa（规格允许重排归约顺序）外，所有实现的校验和必须**位级相等**，
- *     否则该 op 的数据判为无效并计入 g_cs_fail（退出码 1）。
+ *   - 校验和判定按 **op 形态** 分两类（不看实现名字，见 is_reduction_op()）：
+ *       · 逐元素 op：除参考档 scalar_api 外，所有实现的校验和必须**位级相等**；
+ *       · 归约 op（dot：结果是一个累加标量，规格与编译器都允许重结合）：用随项数增长的
+ *         相对容差 8·eps·√n（见 reduction_tol()）—— 固定 1e-6 在 n 大时数学上不可能成立，
+ *         n=1048576 实测 soa 相对偏差 2.35e-05。
+ *     越界者该 op 的数据判为无效并计入 g_cs_fail（退出码 1）。
  *
  * 四档实现：
  *   scalar_api  —— 逐元素调用库标量 API（跨 TU 调用，不可内联）
@@ -19,6 +23,7 @@
 #include "flashvec.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -51,7 +56,7 @@ static double cpu_mhz(void)
 static void* xalloc(size_t bytes)
 {
     void* p = std::aligned_alloc(64, (bytes + 63u) & ~(size_t)63u);
-    if (!p) { std::fprintf(stderr, "alloc 失败 (%zu 字节)\n", bytes); std::exit(2); }
+    if (!p) { std::fprintf(stderr, "alloc failed (%zu bytes)\n", bytes); std::exit(2); }
     return p;
 }
 
@@ -126,18 +131,25 @@ static void cs_check(const char* op, const char* impl, double cs, double ref, do
     if (dbits(cs) == dbits(ref)) return;
     double rel = std::fabs(cs - ref) / (std::fabs(ref) > 0.0 ? std::fabs(ref) : 1.0);
     if (tol_rel >= 0.0 && rel <= tol_rel) {
-        std::printf("    [校验和] %s/%s 非位级相等，相对误差 %.3g ≤ %.3g（规格允许）\n", op, impl, rel, tol_rel);
+        std::printf("    [checksum] %s/%s not bit-identical, relative error %.3g ≤ %.3g (allowed by spec)\n", op, impl, rel, tol_rel);
         return;
     }
-    std::printf("    [校验和] ✗ %s/%s cs=%.17g ref=%.17g rel=%.3g → 本轮数据无效\n", op, impl, cs, ref, rel);
+    std::printf("    [checksum] ✗ %s/%s cs=%.17g ref=%.17g rel=%.3g → this round's data is invalid\n", op, impl, cs, ref, rel);
     g_cs_fail++;
 }
+
+/* 归约 op：结果是一个累加标量 → 和式顺序可变，要求位级相等本身是错判据 */
+static bool is_reduction_op(const char* op) { return std::strcmp(op, "dot") == 0; }
+
+/* float 重结合误差量级 ~ eps·√n（随机符号下部分抵消），留 8 倍余量；
+   逐元素 op 不用它（row() 对非归约 op 一律传 -1，仍要求位级相等） */
+static double reduction_tol(size_t n) { return 8.0 * (double)FLT_EPSILON * std::sqrt((double)n) + 1e-9; }
 
 template <class F>
 static double time_op(size_t n, F&& f, double* cs_out)
 {
     *cs_out = f();                                   /* 校验和＝单次调用结果 */
-    double c0 = now_ns(); f(); double c1 = now_ns();  /* warm-up + 校准 */
+    double c0 = now_ns(); g_sink += f(); double c1 = now_ns();  /* warm-up + 校准：结果必须进 volatile sink，否则纯函数调用会被整个删掉，once≈0 → iters 撞上限 */
     double once = c1 - c0;
     if (once < 1.0) once = 1.0;
     double iters_d = 6.0e6 / once;                    /* ~6 ms 一个取样 */
@@ -178,7 +190,8 @@ static void row(const char* op, const char* impl, double ns, double cs, double b
     std::printf("  %-12s %-14s %10.3f %9.2fx %18.8g", op, impl, ns, base_ns / ns, cs);
     if (g_mhz > 0.0) std::printf(" %8.2f", ns * g_mhz / 1000.0);
     std::printf("\n");
-    if (std::strcmp(impl, "scalar_api") != 0) cs_check(op, impl, cs, g_ref_cs, g_ref_tol);
+    /* 容差只给归约 op；逐元素 op 即使 g_ref_tol 被设过也要求位级相等 */
+    if (std::strcmp(impl, "scalar_api") != 0) cs_check(op, impl, cs, g_ref_cs, is_reduction_op(op) ? g_ref_tol : -1.0);
 }
 
 int main(int argc, char** argv)
@@ -186,15 +199,15 @@ int main(int argc, char** argv)
     size_t sizes[2] = { 8192u, (size_t)1 << 20 };
     if (argc > 1 && std::strcmp(argv[1], "--small") == 0) sizes[1] = 65536u;
     g_mhz = cpu_mhz();
-    std::printf("flashvec perf —— 独立基准（median of 5 × ~6 ms 取样, CLOCK_MONOTONIC）\n");
-    std::printf("构建: %s %s\n", __DATE__, __TIME__);
-    std::printf("起始平均 CPU 频率: %.1f MHz（cycle 列用此换算；并行构建/负载会同时影响频率与带宽）\n", g_mhz);
+    std::printf("flashvec perf — independent benchmark (median of 5 × ~6 ms samples, CLOCK_MONOTONIC)\n");
+    std::printf("build: %s %s\n", __DATE__, __TIME__);
+    std::printf("starting mean CPU frequency: %.1f MHz (the cycle column converts through it; parallel builds and load shift both frequency and bandwidth)\n", g_mhz);
 
     for (int si = 0; si < 2; ++si) {
         size_t n = sizes[si];
         Buf B;
         init_buf(B, n);
-        std::printf("\n=== N=%zu (%s, 工作集 AoS a/b/o=%.1f MB) ===\n", n, si == 0 ? "L2 驻留" : "撞带宽墙", 3.0 * (double)n * 8.0 / 1048576.0);
+        std::printf("\n=== N=%zu (%s, working set AoS a/b/o=%.1f MB) ===\n", n, si == 0 ? "L2-resident" : "bandwidth-bound", 3.0 * (double)n * 8.0 / 1048576.0);
         std::printf("  %-12s %-14s %10s %10s %18s %8s\n", "op", "impl", "ns/elem", "speedup", "checksum", "cycle/el");
 
         /* ---- add ---- */
@@ -228,15 +241,15 @@ int main(int argc, char** argv)
         row("lerp", "scalar_flat", f1, cs, base, true);
         x1 = time_op(n, [&]{ fv_vec2_lerp_x4(B.a, B.b, t, B.o, n); return cs_vec2(B.o, n); }, &cs);
         row("lerp", "x4", x1, cs, base, true);
-        row("lerp", "soa(无此入口)", 0, 0, base, false);
+        row("lerp", "soa(n/a)", 0, 0, base, false);
 
-        /* ---- dot（dot_soa 允许重排归约顺序 → 容差 1e-6 相对） ---- */
-        g_ref_tol = 1e-6;
+        /* ---- dot（归约 op：允许重排和式顺序 → 相对容差随 √n 增长） ---- */
+        g_ref_tol = reduction_tol(n);
         base = time_op(n, [&]{ float s = 0; for (size_t i = 0; i < n; ++i) s += fv_vec2_dot(B.a[i], B.b[i]); return (double)s; }, &base_cs);
         g_ref_cs = base_cs; row("dot", "scalar_api", base, base_cs, base, true);
         f1 = time_op(n, [&]{ float s = 0; for (size_t i = 0; i < n; ++i) { fv_vec2 x = B.a[i], y = B.b[i]; s += x.x * y.x + x.y * y.y; } return (double)s; }, &cs);
         row("dot", "scalar_flat", f1, cs, base, true);
-        row("dot", "x4(无此入口)", 0, 0, base, false);
+        row("dot", "x4(n/a)", 0, 0, base, false);
         s1 = time_op(n, [&]{ return (double)fv_vec2_dot_soa(B.ax, B.ay, B.bx, B.by, n); }, &cs);
         row("dot", "soa", s1, cs, base, true);
         g_ref_tol = -1.0;
@@ -246,7 +259,7 @@ int main(int argc, char** argv)
         g_ref_cs = base_cs; row("len", "scalar_api", base, base_cs, base, true);
         f1 = time_op(n, [&]{ double s = 0; for (size_t i = 0; i < n; ++i) { fv_vec2 x = B.a[i]; s += (double)std::sqrt(x.x * x.x + x.y * x.y); } return s; }, &cs);
         row("len", "scalar_flat", f1, cs, base, true);
-        row("len", "x4(无此入口)", 0, 0, base, false);
+        row("len", "x4(n/a)", 0, 0, base, false);
         s1 = time_op(n, [&]{ fv_vec2_len_soa(B.ax, B.ay, B.lenout, n); double s = 0; for (size_t i = 0; i < n; ++i) s += (double)B.lenout[i]; return s; }, &cs);
         row("len", "soa", s1, cs, base, true);
 
@@ -255,7 +268,7 @@ int main(int argc, char** argv)
         g_ref_cs = base_cs; row("normalize", "scalar_api", base, base_cs, base, true);
         f1 = time_op(n, [&]{ for (size_t i = 0; i < n; ++i) { fv_vec2 x = B.a[i]; float l = std::sqrt(x.x * x.x + x.y * x.y); fv_vec2 r; if (l <= FV_EPS) { r.x = 0; r.y = 0; } else { float inv = 1.0f / l; r.x = x.x * inv; r.y = x.y * inv; } B.o[i] = r; } return cs_vec2(B.o, n); }, &cs);
         row("normalize", "scalar_flat", f1, cs, base, true);
-        row("normalize", "x4(无此入口)", 0, 0, base, false);
+        row("normalize", "x4(n/a)", 0, 0, base, false);
         s1 = time_op(n, [&]{ fv_vec2_normalize_soa(B.ax, B.ay, B.ox, B.oy, n); return cs_soa(B.ox, B.oy, n); }, &cs);
         row("normalize", "soa", s1, cs, base, true);
 
@@ -298,7 +311,7 @@ int main(int argc, char** argv)
             return s;
         }, &cs);
         row("collision", "soa_hybrid", s1, cs, base, true);
-        row("collision", "x4(无此入口)", 0, 0, base, false);
+        row("collision", "x4(n/a)", 0, 0, base, false);
 
         /* ---- 稀疏：掩码 / 索引（两种实现的初始 o 都清零，校验和可直接比对） ---- */
         const size_t NS = n;
@@ -334,11 +347,11 @@ int main(int argc, char** argv)
             row("add_idx", impl, g1, cs, base, true);
         }
         std::free(mask); std::free(idx);
-        std::printf("  (ns/elem 以 N 为分母；稀疏档 speedup 相对同稀疏度的标量循环)\n");
+        std::printf("  (ns/elem is divided by N; sparse speedup is relative to the scalar loop at the same density)\n");
     }
-    std::printf("\n校验和一致性: %d/%d 通过（唯一容差例外: dot_soa 允许重排归约顺序）\n",
+    std::printf("\nchecksum consistency: %d/%d passed (reduction op dot: relative tolerance 8*eps*sqrt(n); everything else must be bit-identical)\n",
                 g_cs_total - g_cs_fail, g_cs_total);
-    std::printf("结束平均 CPU 频率: %.1f MHz\n", cpu_mhz());
-    std::printf("结论: %s\n", g_cs_fail ? "存在校验和不一致 → 上表部分数据无效" : "所有实现的校验和位级相等 → 各档在测同一份工作量");
+    std::printf("ending mean CPU frequency: %.1f MHz\n", cpu_mhz());
+    std::printf("verdict: %s\n", g_cs_fail ? "checksum mismatch → part of the table above is invalid" : "checksums consistent → all variants measure the same work");
     return g_cs_fail ? 1 : 0;
 }

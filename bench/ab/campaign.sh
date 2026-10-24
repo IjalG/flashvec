@@ -1,16 +1,21 @@
 #!/bin/sh
-# bench/ab/campaign.sh —— 一轮覆盖所有新入口的实测（_stream / _mask_inplace / vec3 / vec4）
+# bench/ab/campaign.sh -- one measurement campaign covering every new entry point
+# (_stream / _mask_inplace / vec3 / vec4)
 #
 #   sh bench/ab/campaign.sh
 #
-# 安静窗口判据（这台机器的外部负载是**常驻**的，不能用 loadavg 当门）：
-#   pgrep -f 'cc1plus|cc1 |make -C bench/ab|g\+\+ .*flashvec' 连续 60 s 为空。
-#   loadavg 只记录、不拒绝；只有测量期间涨幅 > 1.0 才提示。
-#   10 分钟等不到干净窗口 -> 照跑，但全部结论标 POLLUTED（不得据此决定去留）。
+# Quiet-window criterion (the external load on this machine is **permanent**, so loadavg
+# cannot be the gate):
+#   pgrep -f 'cc1plus|cc1 |make -C bench/ab|g\+\+ .*flashvec' empty for 60 s in a row.
+#   loadavg is only recorded, never used to reject; only a rise > 1.0 during the campaign
+#   is reported.
+#   No clean window within 10 minutes -> run anyway, but tag every verdict POLLUTED (never
+#   use those numbers to decide whether a change stays).
 #
-# 每个 (op, size) 的判定：R1 位级 / R2 中位比 / R3 同向（2 构建 × 2 顺序）/
-# R4 增益 vs 同轮交错的 A/A 地板 / R5 其它规模；三档 PASS / FAIL / INCONCLUSIVE。
-# 131072 只记录、不作判据（该档 A/A 在 0.50–2.22）。
+# Verdict per (op, size): R1 bit-identical / R2 median ratio / R3 same direction (2 builds
+# x 2 orders) / R4 gain vs the same-round interleaved A/A floor / R5 other sizes; three
+# verdicts PASS / FAIL / INCONCLUSIVE. 131072 is recorded but never judged (A/A there runs
+# 0.50-2.22).
 set -u
 ABDIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$ABDIR/../.." && pwd)
@@ -29,8 +34,8 @@ busy() { pgrep -f 'cc1plus|cc1 |make -C bench/ab|g\+\+ .*flashvec' >/dev/null 2>
 
 echo "====================================================================="
 echo "campaign  $(date '+%%F %%H:%%M:%%S')  loadavg=$(cut -d' ' -f1 /proc/loadavg)  nproc=$(nproc)"
-echo "窗口判据：无我方编译进程（cc1plus/cc1/make -C bench/ab/g++ *flashvec）连续 60 s"
-echo "注意：本机 loadavg 常驻 4–9 而 cc1plus=0 —— 负载来自常驻外部进程，不是我们的编译。"
+echo "window criterion: none of our compile processes (cc1plus/cc1/make -C bench/ab/g++ *flashvec) for 60 s"
+echo "note: loadavg sits at 4-9 while cc1plus=0 -- the load is a resident external process, not our build."
 echo "====================================================================="
 
 wait_clean() {
@@ -42,10 +47,10 @@ wait_clean() {
             sleep 5; k=$((k + 1))
             if busy; then clean=0; break; fi
         done
-        if [ "$clean" = "1" ]; then echo "  窗口干净（等了 $waited s）"; return 0; fi
+        if [ "$clean" = "1" ]; then echo "  window is clean (waited $waited s)"; return 0; fi
         waited=$((waited + 60))
     done
-    echo "  等不到干净窗口（$WAIT_MAX s）→ 照跑，全部结论标 POLLUTED"
+    echo "  no clean window within $WAIT_MAX s -> running anyway, every verdict tagged POLLUTED"
     POLLUTED=1
     return 1
 }
@@ -55,14 +60,14 @@ mk_bin() {
     make -s -f "$ABDIR/Makefile" "$1/ab_bench" BUILD="$1" CXXFLAGS="$BASE $2" \
         CAND_INC="$WT/include" CAND_HDR="$WT/include/flashvec.h" \
         CAND_SRC="$WT/src/flashvec_batch.cpp" CAND_WITH_SRC="$(cat "$WT/WITH_SRC")" \
-        AB_OPS_EXTRA=1 CAND_LABEL=campaign "CAND_DESC=工作树快照" >"$1/build.log" 2>&1 || {
-        echo "构建失败 $1" >&2; tail -10 "$1/build.log" >&2; return 1; }
+        AB_OPS_EXTRA=1 CAND_LABEL=campaign "CAND_DESC=worktree snapshot" >"$1/build.log" 2>&1 || {
+        echo "build failed: $1" >&2; tail -10 "$1/build.log" >&2; return 1; }
 }
 
 wait_clean || true
 LOAD0=$(cut -d' ' -f1 /proc/loadavg)
 
-echo "[0/5] 冻结源码 + 两套构建（只差代码放置）……"
+echo "[0/5] freeze the sources + build both sides (they differ only in code placement)..."
 make -s -f "$ABDIR/Makefile" snapshot >/dev/null 2>&1
 make -s -f "$ABDIR/Makefile" worktree-snapshot >"$ABDIR/build/campaign_snap.log" 2>&1
 WT=$ABDIR/build/worktree_snapshot
@@ -72,7 +77,7 @@ B1=$VB/ab1/ab_bench
 B2=$VB/ab2/ab_bench
 mkdir -p "$RAW" "$VB"
 
-echo "[1/5] R1 位级对拍（每个新入口一次，覆盖所有尾长）……"
+echo "[1/5] R1 bit-identical check (once per new entry point, all tail lengths)..."
 GATE_TSV=$VB/gate.tsv
 : > "$GATE_TSV"
 gate_sizes() {
@@ -89,7 +94,7 @@ for op in $OPS_NEW; do
     done
     printf '%s\t%s\n' "$op" "$ok" >> "$GATE_TSV"
 done
-echo "  $(grep -c '\t1$' "$GATE_TSV" || echo 0)/$(wc -l < "$GATE_TSV") 个 op 通过"
+echo "  $(grep -c '\t1$' "$GATE_TSV" || echo 0)/$(wc -l < "$GATE_TSV") ops passed"
 
 run_group() { # $1=tag $2=size $3=extra args
     for tag in 1 2; do
@@ -102,23 +107,23 @@ run_group() { # $1=tag $2=size $3=extra args
     done
 }
 
-echo "[2/5] _stream 六个入口 × 5 个规模（普通 store 作 A 侧对照）……"
+echo "[2/5] six _stream entries x 5 sizes (the plain-store version is the A side)..."
 for n in 8192 131072 1048576 4194304 8388608; do run_group stream "$n" "--ops=_stream"; done
 
-echo "[3/5] _mask_inplace × 5 种密度 × 4 个规模……"
+echo "[3/5] _mask_inplace x 5 mask densities x 4 sizes..."
 for d in 0.01 0.05 0.20 0.50 0.95; do
     for n in 8192 65536 1048576 4194304; do
         run_group "mask_$d" "$n" "--ops=_inplace --mask-density=$d"
     done
 done
 
-echo "[4/5] vec4 / vec3（INTRA：candidate 内部同字节量对照）……"
+echo "[4/5] vec4 / vec3 (INTRA: same-byte-volume control inside the candidate)..."
 for n in 8192 131072 1048576 4194304 8388608; do
     run_group v4 "$n" "--intra --ops=fv_vec4"
     run_group v3 "$n" "--intra --ops=fv_vec3"
 done
 
-echo "[5/5] 汇总判定……"
+echo "[5/5] summary and verdicts..."
 LOAD1=$(cut -d' ' -f1 /proc/loadavg)
 cat "$VB"/r_*.tsv > "$VB/all.tsv" 2>/dev/null
 
@@ -149,19 +154,19 @@ END {
         gain = amin - 1
         split(k, kk, "\t")
         if (polluted) vd = "POLLUTED"
-        else if (kk[2] == black) vd = "INCONCLUSIVE(黑名单档)"
-        else if (med < 1.0 && dev(med) > fdev) vd = "FAIL(变慢)"
-        else if (fdev > 0.15) vd = "INCONCLUSIVE(地板>15%)"
-        else if (gain <= fdev) vd = "INCONCLUSIVE(增益<=地板)"
-        else if (amin < 1.15) vd = "INCONCLUSIVE(未达1.15)"
+        else if (kk[2] == black) vd = "INCONCLUSIVE(blacklisted tier)"
+        else if (med < 1.0 && dev(med) > fdev) vd = "FAIL(slower)"
+        else if (fdev > 0.15) vd = "INCONCLUSIVE(floor>15%)"
+        else if (gain <= fdev) vd = "INCONCLUSIVE(gain<=floor)"
+        else if (amin < 1.15) vd = "INCONCLUSIVE(below 1.15)"
         else vd = "PASS"
         printf "%-24s %-8s %-7s %6.3f %6.3f %6.3f %+7.3f %6.1f  %s\n", kk[1], kk[2], kk[3], med, amin, fl, gain, iqr[k], vd
     }
 }' "$VB/all.tsv" | sort -k1,1 -k2,2n | tee "$RAW/ab_campaign_verdict.txt"
 
 echo
-echo "loadavg 起 $LOAD0 止 $LOAD1    POLLUTED=$POLLUTED"
+echo "loadavg start $LOAD0 end $LOAD1    POLLUTED=$POLLUTED"
 if [ "$POLLUTED" = "1" ]; then
-    echo "!!! 本轮未等到干净窗口：以上结论一律 POLLUTED，**不得据此决定去留** !!!"
+    echo "!!! no clean window this round: every verdict above is POLLUTED, **do not act on it** !!!"
 fi
-echo "原始数据: $VB/*.tsv   判定表: $RAW/ab_campaign_verdict.txt"
+echo "raw data: $VB/*.tsv   verdict table: $RAW/ab_campaign_verdict.txt"

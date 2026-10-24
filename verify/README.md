@@ -57,33 +57,33 @@ descending order, with many duplicates, and shuffled.
 
 Every function's output buffer carries an out-of-bounds write canary: o[n..) must not be written.
 
-*(The fixture's stdout is reproduced verbatim. Column words: 判定 = verdict, vs库标量 = vs library
-scalar, vs独立参考 = vs independent reference, 备注 = note.)*
+    [P0] constants and small helpers
+      FV_EPS / FV_EPS_SQR values                 PASS  FV_EPS=9.99999997e-07 FV_EPS_SQR=9.99999996e-13 (FV_EPS*FV_EPS=9.99999996e-13) bits=FV_EPS_SQR:0x2b8cbccc
+      fv_vec2 min/max/madd                       PASS  cases=100 mismatches=0
+      fv_vec2_clamp clamping                     PASS  cases=75 mismatches=0
+      fv_vec3 min/max/clamp/madd                 PASS  cases=1000 mismatches=0
+      fv_aabb2_merge(box,p) = [min(lo,p),max(hi,p)] PASS  6 points, mismatches=0
+      fv_aabb2_overlaps clear overlap/separate   PASS  A∩B=1 A∩A=1(far)=0 A∩D=0  (expected 1,1,0,0)
+      fv_aabb2_overlaps edge touch               INFO  A(lo=1,1) vs C(lo=2,2) touch only at a corner: overlaps=0 (spec undefined, recorded only)
+      min/max signed-zero behavior               INFO  min((-0,0),(0,-0))=(0x00000000,0x80000000) max=(0x00000000,0x80000000)
+      comparator self-check (NaN / +0-0 / 1ulp)  PASS  NaN(different payload)→equal=1 nan_pair=1; (+0,-0)→equal=0 szero=1; (1,1+1ulp)→equal=0
 
-    [逐元素批量路径 vs 标量路径 位级一致性]   （-O2 默认档与 -O3 -march=native 档结果相同）
-      函数                     判定   samples  vs库标量 vs独立参考 备注
-      fv_vec2_add_x4             PASS     1224     PASS     PASS     NaN对=2
-      fv_vec2_sub_x4             PASS     1224     PASS     PASS
-      fv_vec2_scale_x4           PASS     11016    PASS     PASS
-      fv_vec2_lerp_x4            PASS     11016    PASS     PASS
-      fv_vec2_madd_x4            PASS     11016    PASS     PASS
-      fv_vec2_add_x4_mask        PASS     1530     PASS     PASS     NaN对=8
-      fv_vec2_add_x4_idx         PASS     914      PASS     PASS
-      fv_vec2_scale_x4_idx       PASS     914      PASS     PASS
-      fv_vec2_add_soa            PASS     1224     PASS     PASS
-      fv_vec2_scale_soa          PASS     11016    PASS     PASS
-      fv_vec2_len_soa            PASS     612      PASS     PASS
-      fv_vec2_normalize_soa      PASS     1224     PASS     PASS
-
-    [P0 检查]
-      FV_EPS / FV_EPS_SQR 取值                 PASS  FV_EPS=9.99999997e-07 FV_EPS_SQR=9.99999996e-13 位=FV_EPS_SQR:0x2b8ccc
-      fv_vec2 min/max/madd（100 组）           PASS
-      fv_vec2_clamp 夹取（75 组）              PASS
-      fv_vec3 min/max/clamp/madd（1000 组）    PASS
-      fv_aabb2_merge / overlaps                PASS  A∩B=1 A∩A=1 A∩C=0 A∩D=0
-      比较器自检（NaN payload / ±0 / 1ulp）    PASS
-      fv_aabb2_overlaps 边界相触               INFO  角点相触=0（规格未定义，仅记录）
-      min/max 的 ±0 行为                       INFO  min((-0,0),(0,-0))=(0x00000000,0x80000000)
+    [element-wise batch path vs scalar path: bit-identical]
+      Function                   Verdict  samples  vs lib scalar    vs independent ref note
+      fv_vec2_add_x4             PASS     1224     PASS             PASS               NaN pairs=2
+      fv_vec2_sub_x4             PASS     1224     PASS             PASS
+      fv_vec2_scale_x4           PASS     11016    PASS             PASS
+      fv_vec2_lerp_x4            PASS     11016    PASS             PASS
+      fv_vec2_madd_x4            PASS     11016    PASS             PASS
+      fv_vec2_add_x4_mask        PASS     1530     PASS             PASS               NaN pairs=4
+      fv_vec2_add_x4_idx         PASS     914      PASS             PASS
+      fv_vec2_scale_x4_idx       PASS     914      PASS             PASS
+      fv_vec2_add_soa            PASS     1224     PASS             PASS
+      fv_vec2_scale_soa          PASS     11016    PASS             PASS
+      fv_vec2_len_soa            PASS     612      PASS             PASS
+      fv_vec2_normalize_soa      PASS     1224     PASS             PASS
+      fv_mat4_transform_points   PASS     6880     PASS             PASS
+      fv_mat4_transform_dirs     PASS     6880     PASS             PASS
 
 All three configurations green, exit code 0. The three are **-O2 without -march=native** (the default
 build configuration), **-O3 -march=native**, and **ASan+UBSan** (-O1).
@@ -106,13 +106,12 @@ I first fixed a new Stat() leak in my own fixture, and after that exit=0.
 **dot_soa is scored on error only, with no bit-level verdict**, because the specification allows it to
 reorder the reduction.
 
-*(Verbatim fixture output: 逐位相等 = bit-equal, 语料 = corpus, 头文件断言 = header assertion, 纯顺序累加 =
-plain sequential accumulation, 逐 n 逐位相等次数 = bit-equal count per n, 各 = each.)*
-
-    fv_vec2_dot_soa            PASS*    144 cases   逐位相等 143/144
-                              max|abs err| = 4.77e-07，max rel err = 6.22e-08（语料含 1e30 量级）
-    dot_soa 头文件断言(n<8 纯顺序累加)  PASS  n<8 逐位一致 64/64（头文件 line 149 的断言成立）
-    逐 n 逐位相等次数: 0..7 各 8/8；8:7/8；9..17 各 8/8
+    [dot_soa: spec allows reordering the reduction → no bit-level verdict]
+      Function                   Verdict  cases    note
+      fv_vec2_dot_soa            PASS*    144      bit-identical 143/144, max|abs err|=4.77e-07, max rel err=6.22e-08 (float input, |value| up to 1e30)
+                                 * dot_soa may reorder the reduction, so error statistics replace the bit comparison; every other path gets a bit-level verdict.
+      dot_soa n<8 header assert  PASS     n<8 bit-identical 64/64  (header line 149 assertion holds)
+      dot_soa exact bits per n   0:8/8 1:8/8 2:8/8 3:8/8 4:8/8 5:8/8 6:8/8 7:8/8 8:7/8 9:8/8 10:8/8 11:8/8 12:8/8 13:8/8 14:8/8 15:8/8 16:8/8 17:8/8
 
 ---
 
@@ -132,69 +131,99 @@ ns/element, I measured 1.240. What is comparable is a ratio within one run.
 
 Raw output: verify/build/perf_O3_native.txt (revised fixture, -O3 -march=native). Copied line for line:
 
-*(The columns are ASCII apart from these: 起始平均 CPU 频率 = starting mean CPU frequency, 校验和 = checksum,
-无此入口 = no such entry point, 触到我设的容差线 = hit the tolerance line I set.)*
+    flashvec perf — independent benchmark (median of 5 × ~6 ms samples, CLOCK_MONOTONIC)
+    build: Oct 24 2026 13:50:25
+    starting mean CPU frequency: 3332.7 MHz (the cycle column converts through it; parallel builds and load shift both frequency and bandwidth)
 
-    起始平均 CPU 频率: 3125.2 MHz
-
-    === N=8192 (L2 驻留, 工作集 AoS a/b/o=0.2 MB) ===
+    === N=8192 (L2-resident, working set AoS a/b/o=0.2 MB) ===
       op           impl              ns/elem    speedup           checksum cycle/el
-      add          scalar_api          2.601      1.00x          -206.8001     8.13
-      add          scalar_flat         1.207      2.15x          -206.8001     3.77
-      add          x4                  1.240      2.10x          -206.8001     3.87
-      add          soa                 1.369      1.90x          -206.8001     4.28
-      scale        scalar_api          2.776      1.00x          7.7606516     8.68
-      scale        scalar_flat         1.154      2.41x          7.7606516     3.61
-      scale        x4                  1.079      2.57x          7.7606516     3.37
-      scale        soa                 1.027      2.70x          7.7606516     3.21
-      lerp         scalar_api          3.002      1.00x          -75.61176     9.38
-      lerp         scalar_flat         1.633      1.84x          -75.61176     5.10
-      lerp         x4                  1.196      2.51x          -75.61176     3.74
-      lerp         soa(无此入口)          -          -                  -
-      dot          scalar_api          3.087      1.00x          19.535582     9.65
-      dot          scalar_flat         1.024      3.02x          19.535582     3.20
-      dot          x4(无此入口)          -          -                  -
-      dot          soa                 0.152     20.33x          19.535637     0.47
-        [校验和] X dot/soa cs=19.535636901855469 ref=19.535581588745117 rel=2.83e-06 -> 触到我设的 1e-6 容差线
-      len          scalar_api          3.046      1.00x          12501.319     9.52
-      len          scalar_flat         1.649      1.85x          12501.319     5.15
-      len          x4(无此入口)          -          -                  -
-      len          soa                 1.149      2.65x          12501.319     3.59
-      normalize    scalar_api          4.382      1.00x         -54.362158    13.69
-      normalize    scalar_flat         3.882      1.13x         -54.362158    12.13
-      normalize    x4(无此入口)          -          -                  -
-      normalize    soa                 1.306      3.35x         -54.362158     4.08
-      collision    scalar_api          8.481      1.00x            6.44906    26.51
-      collision    scalar_flat         6.216      1.36x            6.44906    19.43
-      collision    soa_hybrid          1.670      5.08x            6.44906     5.22
-      collision    x4(无此入口)          -          -                  -
-      add_mask     scalar(5%)          2.083      1.00x         -13.461817     6.51
-      add_mask     x4_mask(5%)         1.227      1.70x         -13.461817     3.83
-      add_mask     scalar(50%)         4.648      1.00x         -200.68404    14.53
-      add_mask     x4_mask(50%)        1.223      3.80x         -200.68404     3.82
-      add_mask     scalar(95%)         3.971      1.00x         -138.84498    12.41
-      add_mask     x4_mask(95%)        1.210      3.28x         -138.84498     3.78
-      add_idx      scalar(5%)          1.021      1.00x          15.822212     3.19
-      add_idx      x4_idx(5%)          0.950      1.08x          15.822212     2.97
-      add_idx      scalar(50%)         2.248      1.00x         -56.604818     7.02
-      add_idx      x4_idx(50%)         1.670      1.35x         -56.604818     5.22
+      add          scalar_api          2.154      1.00x          -206.8001     7.18
+      add          scalar_flat         0.950      2.27x          -206.8001     3.17
+      add          x4                  0.958      2.25x          -206.8001     3.19
+      add          soa                 0.899      2.40x          -206.8001     3.00
+      scale        scalar_api          1.919      1.00x          7.7606516     6.40
+      scale        scalar_flat         0.882      2.18x          7.7606516     2.94
+      scale        x4                  0.899      2.13x          7.7606516     3.00
+      scale        soa                 0.836      2.30x          7.7606516     2.79
+      lerp         scalar_api          2.129      1.00x          -75.61176     7.10
+      lerp         scalar_flat         1.277      1.67x          -75.61176     4.25
+      lerp         x4                  0.970      2.20x          -75.61176     3.23
+      lerp         soa(n/a)                -          -                  -
+      dot          scalar_api          2.364      1.00x          19.535582     7.88
+      dot          scalar_flat         0.732      3.23x          19.535582     2.44
+      dot          x4(n/a)                 -          -                  -
+      dot          soa                 0.121     19.53x          19.535637     0.40
+        [checksum] dot/soa not bit-identical, relative error 2.83e-06 ≤ 8.63e-05 (allowed by spec)
+      len          scalar_api          2.434      1.00x          12501.319     8.11
+      len          scalar_flat         1.305      1.87x          12501.319     4.35
+      len          x4(n/a)                 -          -                  -
+      len          soa                 0.872      2.79x          12501.319     2.91
+      normalize    scalar_api          3.345      1.00x         -54.362158    11.15
+      normalize    scalar_flat         2.936      1.14x         -54.362158     9.78
+      normalize    x4(n/a)                 -          -                  -
+      normalize    soa                 1.012      3.31x         -54.362158     3.37
+      collision    scalar_api          6.418      1.00x            6.44906    21.39
+      collision    scalar_flat         4.717      1.36x            6.44906    15.72
+      collision    soa_hybrid          1.290      4.98x            6.44906     4.30
+      collision    x4(n/a)                 -          -                  -
+      add_mask     scalar(5%)          1.546      1.00x         -13.461817     5.15
+      add_mask     x4_mask(5%)         0.958      1.61x         -13.461817     3.19
+      add_mask     scalar(50%)         3.304      1.00x         -200.68404    11.01
+      add_mask     x4_mask(50%)        0.953      3.47x         -200.68404     3.18
+      add_mask     scalar(95%)         2.717      1.00x         -138.84498     9.05
+      add_mask     x4_mask(95%)        0.966      2.81x         -138.84498     3.22
+      add_idx      scalar(5%)          0.798      1.00x          15.822212     2.66
+      add_idx      x4_idx(5%)          0.772      1.03x          15.822212     2.57
+      add_idx      scalar(50%)         1.556      1.00x         -56.604818     5.19
+      add_idx      x4_idx(50%)         1.349      1.15x         -56.604818     4.50
+      (ns/elem is divided by N; sparse speedup is relative to the scalar loop at the same density)
 
-    === N=1048576 (撞带宽墙, 工作集 AoS a/b/o=24.0 MB) ===
+    === N=1048576 (bandwidth-bound, working set AoS a/b/o=24.0 MB) ===
       op           impl              ns/elem    speedup           checksum cycle/el
-      add          scalar_api         13.977      1.00x          603.99968    43.68
-      add          scalar_flat        13.904      1.01x          603.99968    43.45
-      add          x4                  9.722      1.44x          603.99968    30.38
-      add          soa                 9.455      1.48x          603.99968    29.55
-      scale        scalar_api          7.772      1.00x           1274.378    24.29
-      scale        scalar_flat         8.285      0.94x           1274.378    25.89
-      scale        x4                  8.354      0.93x           1274.378    26.11
-      scale        soa                 8.447      0.92x           1274.378    26.40
-      lerp         scalar_api         12.920      1.00x          544.78358    40.38
-      lerp         scalar_flat        10.500      1.23x          544.78358    32.81
-      lerp         x4                 12.319      1.05x          544.78358    38.50
-      lerp         soa(无此入口)          -          -                  -
-      dot          scalar_api          5.268      1.00x          3677.5696    16.46
+      add          scalar_api          3.514      1.00x          603.99968    11.71
+      add          scalar_flat         3.573      0.98x          603.99968    11.91
+      add          x4                  3.479      1.01x          603.99968    11.59
+      add          soa                 3.237      1.09x          603.99968    10.79
+      scale        scalar_api          3.105      1.00x           1274.378    10.35
+      scale        scalar_flat         3.512      0.88x           1274.378    11.70
+      scale        x4                  3.331      0.93x           1274.378    11.10
+      scale        soa                 2.972      1.04x           1274.378     9.90
+      lerp         scalar_api          3.570      1.00x          544.78358    11.90
+      lerp         scalar_flat         3.517      1.01x          544.78358    11.72
+      lerp         x4                  3.952      0.90x          544.78358    13.17
+      lerp         soa(n/a)                -          -                  -
+      dot          scalar_api          2.510      1.00x          3677.5696     8.37
+      dot          scalar_flat         1.192      2.11x          3677.5696     3.97
+      dot          x4(n/a)                 -          -                  -
+      dot          soa                 1.059      2.37x           3677.656     3.53
+        [checksum] dot/soa not bit-identical, relative error 2.35e-05 ≤ 0.000977 (allowed by spec)
+      len          scalar_api          2.504      1.00x          1604312.9     8.35
+      len          scalar_flat         1.464      1.71x          1604312.9     4.88
+      len          x4(n/a)                 -          -                  -
+      len          soa                 1.967      1.27x          1604312.9     6.55
+      normalize    scalar_api          3.992      1.00x          847.68651    13.31
+      normalize    scalar_flat         3.760      1.06x          847.68651    12.53
+      normalize    x4(n/a)                 -          -                  -
+      normalize    soa                 2.748      1.45x          847.68651     9.16
+      collision    scalar_api          7.212      1.00x         -325.11293    24.04
+      collision    scalar_flat         5.439      1.33x         -325.11293    18.13
+      collision    soa_hybrid          6.971      1.03x         -325.11293    23.23
+      collision    x4(n/a)                 -          -                  -
+      add_mask     scalar(5%)          4.380      1.00x          984.71682    14.60
+      add_mask     x4_mask(5%)         3.238      1.35x          984.71682    10.79
+      add_mask     scalar(50%)         5.558      1.00x          2074.1754    18.52
+      add_mask     x4_mask(50%)        3.985      1.39x          2074.1754    13.28
+      add_mask     scalar(95%)         3.723      1.00x          991.23225    12.41
+      add_mask     x4_mask(95%)        3.820      0.97x          991.23225    12.73
+      add_idx      scalar(5%)          2.441      1.00x          88.011533     8.13
+      add_idx      x4_idx(5%)          2.374      1.03x          88.011533     7.91
+      add_idx      scalar(50%)        16.344      1.00x         -1881.8571    54.47
+      add_idx      x4_idx(50%)        15.101      1.08x         -1881.8571    50.33
+      (ns/elem is divided by N; sparse speedup is relative to the scalar loop at the same density)
 
+    checksum consistency: 52/52 passed (reduction op dot: relative tolerance 8*eps*sqrt(n); everything else must be bit-identical)
+    ending mean CPU frequency: 3501.9 MHz
+    verdict: checksums consistent → all variants measure the same work
 **The N=1<<20 table is truncated here.** The second half of that configuration produced no trustworthy
 data: the len, normalize, collision and sparse results after dot/soa.
 

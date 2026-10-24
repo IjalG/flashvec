@@ -1,17 +1,19 @@
 #!/bin/sh
-# bench/ab/verify.sh —— 同向证据模式（R1–R5 + INCONCLUSIVE）
+# bench/ab/verify.sh -- same-direction evidence mode (R1-R5 + INCONCLUSIVE)
 #
 #   make -C bench/ab verify OP=fv_vec2_add_x4 N=1048576
 #
-# 关键点（R4 的修法）：**A/A 与 A/B 在同一轮里交错**（--aa-each-round）。
-# 每个进程内，每轮先测 A/B 再测一对 A/A，用同一段代码、同一份数据、同一浸入状态；
-# 跨 2 套构建 × 2 个顺序 × ROUNDS 轮，得到 >=16 个 A/A 样本。地板取这些样本的
-# p50/p90/max，R4 用 **p90** 当分母（比 max 稳，比 p50 严）。
+# The key point (this is the R4 fix): **A/A and A/B interleave inside one round**
+# (--aa-each-round). Within each process every round measures A/B first and then one A/A
+# pair, on the same code, the same data and the same immersion state; across 2 builds x
+# 2 orders x ROUNDS rounds that gives >=16 A/A samples. The floor is the p50/p90/max of
+# those samples and R4 uses **p90** as its divisor (steadier than max, stricter than p50).
 #
-# 结论三档：PASS / FAIL / INCONCLUSIVE
-#   INCONCLUSIVE = 增益在地板以下、同向性不成立、或该点不可分辨（地板 > 15%）。
-#   这不是"优化无效"，是"这台机器测不出来"——两者必须分开。
-# 退出码：0 PASS / 1 FAIL / 4 INCONCLUSIVE / 2 用法 / 3 没有该 op
+# Three verdicts: PASS / FAIL / INCONCLUSIVE
+#   INCONCLUSIVE = the gain is below the floor, same-direction reproduction fails, or the
+#   point is not resolvable (floor > 15%). That is not "the optimisation does nothing", it
+#   is "this machine cannot measure it" -- the two must stay separate.
+# Exit codes: 0 PASS / 1 FAIL / 4 INCONCLUSIVE / 2 usage / 3 no such op
 set -u
 ABDIR=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$ABDIR/../.." && pwd)
@@ -29,7 +31,7 @@ CHECK_SIZES=${CHECK_SIZES:-8192,65536,1048576,4194304}
 EXPECT_REGRESS=${EXPECT_REGRESS:-}
 BLACKLIST=${BLACKLIST:-131072}
 
-[ -n "$OP" ] || { echo "用法: make -C bench/ab verify OP=<op名> [N=<规模>]" >&2; exit 2; }
+[ -n "$OP" ] || { echo "usage: make -C bench/ab verify OP=<op-name> [N=<size>]" >&2; exit 2; }
 
 BASE="-std=c++17 -O3 -fno-math-errno -ffp-contract=off -Wall -Wextra -Wpedantic"
 ALIGN="-falign-functions=64 -falign-loops=32 -falign-jumps=32"
@@ -39,8 +41,8 @@ mk_bin() {
     make -s -f "$ABDIR/Makefile" "$1/ab_bench" BUILD="$1" CXXFLAGS="$BASE $2" \
         CAND_INC="$WT/include" CAND_HDR="$WT/include/flashvec.h" \
         CAND_SRC="$WT/src/flashvec_batch.cpp" CAND_WITH_SRC="$(cat "$WT/WITH_SRC")" \
-        AB_OPS_EXTRA=1 CAND_LABEL=verify "CAND_DESC=工作树快照" >"$1/build.log" 2>&1 || {
-        echo "[verify] 构建失败 $1" >&2; tail -15 "$1/build.log" >&2; return 1; }
+        AB_OPS_EXTRA=1 CAND_LABEL=verify "CAND_DESC=worktree snapshot" >"$1/build.log" 2>&1 || {
+        echo "[verify] build failed: $1" >&2; tail -15 "$1/build.log" >&2; return 1; }
 }
 ge() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 >= b + 0) }'; }
 gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'; }
@@ -48,16 +50,16 @@ lt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 < b + 0) }'; }
 
 echo "====================================================================="
 echo "verify  OP=$OP  N=$N   loadavg=$(cut -d' ' -f1 /proc/loadavg)"
-echo "R1 位级 / R2 目标 >=$MIN_GAIN / R3 同向(AB,BA × 2 构建) / R4 > A/A p90 地板 / R5 其它规模 >=$MAX_REGRESS"
+echo "R1 bit-identical / R2 target >=$MIN_GAIN / R3 same direction (AB,BA x 2 builds) / R4 > A/A p90 floor / R5 other sizes >=$MAX_REGRESS"
 echo "====================================================================="
 
 make -s -f "$ABDIR/Makefile" snapshot >/dev/null 2>&1
 make -s -f "$ABDIR/Makefile" worktree-snapshot >"$ABDIR/build/verify_snap.log" 2>&1 || {
-    echo "worktree-snapshot 失败" >&2; tail -5 "$ABDIR/build/verify_snap.log" >&2; exit 2; }
+    echo "worktree-snapshot failed" >&2; tail -5 "$ABDIR/build/verify_snap.log" >&2; exit 2; }
 WT=$ABDIR/build/worktree_snapshot
 LOAD0=$(cut -d' ' -f1 /proc/loadavg)
 
-echo "[1/4] 构建 AB#1 / AB#2（只差代码放置）……"
+echo "[1/4] building AB#1 / AB#2 (they differ only in code placement)..."
 mk_bin "$VB/ab1" "" || exit 2
 mk_bin "$VB/ab2" "$ALIGN" || exit 2
 B1=$VB/ab1/ab_bench
@@ -66,12 +68,12 @@ B2=$VB/ab2/ab_bench
 IS_INTRA=0
 "$B1" --list-ops | awk -F'\t' -v op="$OP" '$1 == op && $9 == "0x8" { found = 1 } END { exit !found }' && IS_INTRA=1
 if ! "$B1" --list-ops | awk -F'\t' -v op="$OP" '$1 == op { f = 1 } END { exit !f }'; then
-    echo "没有这个 op：$OP（--list-ops 看注册表）" >&2; exit 3
+    echo "no such op: $OP (see the registry with --list-ops)" >&2; exit 3
 fi
 INTRA_FLAG=""
 [ "$IS_INTRA" = "1" ] && INTRA_FLAG="--intra"
 
-echo "[2/4] R1 位级对拍（全尾长 n=N-7…N+3）……"
+echo "[2/4] R1 bit-identical check (all tail lengths n=N-7..N+3)..."
 gs=""; i=-7; while [ "$i" -le 3 ]; do s=$((N + i)); [ "$s" -ge 1 ] && gs="$gs,$s"; i=$((i + 1)); done
 gs=${gs#,}
 GATE_OK=1
@@ -79,9 +81,9 @@ for bin in "$B1" "$B2"; do
     taskset -c "$CPU" "$bin" --gate-only --op="$OP" --sizes="$gs" >"$VB/gate.log" 2>&1 || {
         GATE_OK=0; echo "  gate FAIL: $(grep -m1 'GATE FAIL' "$VB/gate.log")"; }
 done
-[ "$GATE_OK" = "1" ] && echo "  gate-only 通过（两套构建 × 11 个尾长）"
+[ "$GATE_OK" = "1" ] && echo "  gate-only passed (2 builds x 11 tail lengths)"
 
-echo "[3/4] 计时：2 构建 × 2 顺序 × $ROUNDS 轮（每轮 A/B 后紧跟一对 A/A）……"
+echo "[3/4] timing: 2 builds x 2 orders x $ROUNDS rounds (each round: A/B then one A/A pair)..."
 rm -f "$VB"/p_*.tsv
 for tag in 1 2; do
     bin=$([ "$tag" = 1 ] && echo "$B1" || echo "$B2")
@@ -97,7 +99,7 @@ for tag in 1 2; do
     done
 done
 
-echo "[4/4] 汇总 + R5 扫描……"
+echo "[4/4] summary + R5 scan..."
 STATS=$(for f in "$VB"/p_*.tsv; do
     [ -f "$f" ] || continue
     awk -F'\t' -v op="$OP" '
@@ -111,11 +113,19 @@ AA50=$(printf '%s\n' "$STATS" | awk -F'\t' 'NF >= 5 { print $2 }')
 AA90=$(printf '%s\n' "$STATS" | awk -F'\t' 'NF >= 5 { print $3 }')
 AAMAX=$(printf '%s\n' "$STATS" | awk -F'\t' 'NF >= 5 { print $4 }')
 qmed() { sort -g | awk '{ a[NR] = $1 } END { if (NR == 0) { print "1.0000"; exit } printf "%.4f", a[int((NR + 1) / 2)] }'; }
+# An op that exists only in the candidate and has no INTRA pair produces no timing samples at
+# all (the A/B side is unavailable, the INTRA side has no counterpart). Say so instead of
+# printing ratios derived from an empty set -- R1 is then the only verdict that means anything.
+NO_SAMPLES=0
 
 R_MED=$(printf '%s\n' "$RATIOS" | qmed)
 R_MIN=$(printf '%s\n' "$RATIOS" | sort -g | head -1)
 R_MAX=$(printf '%s\n' "$RATIOS" | sort -g | tail -1)
 N_SAMP=$(printf '%s\n' "$RATIOS" | grep -c . || true)
+[ "$N_SAMP" -eq 0 ] 2>/dev/null && NO_SAMPLES=1
+if [ "$NO_SAMPLES" = "1" ]; then
+    R_MED=; R_MIN=; R_MAX=; F50DEV=; F90DEV=; FMAXDEV=; GAIN=
+fi
 F50=$(printf '%s\n' "$AA50" | qmed)
 F90=$(printf '%s\n' "$AA90" | qmed)
 FMAX=$(printf '%s\n' "$AAMAX" | sort -g | tail -1)
@@ -130,7 +140,7 @@ SCAN_BAD=""; SCAN_MIN=99; SCAN_MIN_N=""
 while read -r n r; do
     [ -n "${n:-}" ] || continue
     case ",$BLACKLIST,$EXPECT_REGRESS," in
-        *",$n,"*) echo "      n=$n ratio=$r  （黑名单/已声明：只记录，不作判据）"; continue;;
+        *",$n,"*) echo "      n=$n ratio=$r  (blacklisted / pre-declared: recorded, not judged)"; continue;;
     esac
     if lt "$r" "$SCAN_MIN"; then SCAN_MIN=$r; SCAN_MIN_N=$n; fi
     if lt "$r" "$MAX_REGRESS"; then SCAN_BAD="$SCAN_BAD n=$n:$r"; fi
@@ -143,41 +153,50 @@ EOF
 [ "$SCAN_MIN" = "99" ] && SCAN_MIN=1.0
 
 VERDICT=PASS; WHY=""
-if [ "$GATE_OK" != "1" ]; then VERDICT=FAIL; WHY="R1 位级对拍失败"; fi
-if [ -n "$SCAN_BAD" ]; then VERDICT=FAIL; WHY="R5 回退超限:$SCAN_BAD"; fi
+if [ "$GATE_OK" != "1" ]; then VERDICT=FAIL; WHY="R1 bit-identical check failed"; fi
+if [ -n "$SCAN_BAD" ]; then VERDICT=FAIL; WHY="R5 regression beyond limit:$SCAN_BAD"; fi
 if [ "$N" = "131072" ]; then
-    VERDICT=INCONCLUSIVE; WHY="n=131072 是已知最毒的一档（A/A 0.50–2.22），不得当判据"
+    VERDICT=INCONCLUSIVE; WHY="n=131072 is the known-poisonous tier (A/A 0.50-2.22) and may not be the criterion"
 fi
-MED_DEV=$(awk -v m="$R_MED" 'BEGIN { d = m - 1; if (d < 0) d = -d; printf "%.4f", d }')
+MED_DEV=$(awk -v m="${R_MED:-1}" 'BEGIN { d = m - 1; if (d < 0) d = -d; printf "%.4f", d }')
 if [ "$VERDICT" = "PASS" ]; then
     if lt "$R_MED" "1.0" && gt "$MED_DEV" "$F90DEV"; then
-        # 中位比显著低于 1 且超出地板：这是**测出来的变慢**，不是测不出来
-        VERDICT=FAIL; WHY="中位比 $R_MED 比 1 低 $MED_DEV，超过 A/A 地板 $F90DEV（同向变慢）"
+        # median ratio clearly below 1 and beyond the floor: this is a **measured** slowdown, not an unmeasurable point
+        VERDICT=FAIL; WHY="median $R_MED is $MED_DEV below 1, beyond the A/A floor $F90DEV (same-direction slowdown)"
     elif gt "$F90DEV" "$FLOOR_MAX"; then
-        VERDICT=INCONCLUSIVE; WHY="该点 A/A 地板 $F90DEV > $FLOOR_MAX（不可分辨）"
+        VERDICT=INCONCLUSIVE; WHY="A/A floor at this point is $F90DEV > $FLOOR_MAX (not resolvable)"
     elif ! gt "$GAIN" "$F90DEV"; then
-        VERDICT=INCONCLUSIVE; WHY="增益 $GAIN 未超过 A/A p90 地板 $F90DEV（分辨率以下）"
+        VERDICT=INCONCLUSIVE; WHY="gain $GAIN does not exceed the A/A p90 floor $F90DEV (below resolution)"
     elif ! ge "$R_MIN" "$MIN_GAIN"; then
-        VERDICT=INCONCLUSIVE; WHY="同向但最小 $R_MIN < $MIN_GAIN（未达门槛，四个比值不一致）"
+        VERDICT=INCONCLUSIVE; WHY="same direction but min $R_MIN < $MIN_GAIN (threshold not met, the four ratios disagree)"
     fi
 fi
-[ "$IS_INTRA" = "1" ] && WHY="$WHY [INTRA：candidate 内部对照，不是相对 HEAD 的改进]"
+[ "$IS_INTRA" = "1" ] && WHY="$WHY [INTRA: candidate-internal control, not an improvement over HEAD]"
+if [ "$NO_SAMPLES" = "1" ]; then
+    VERDICT=INCONCLUSIVE
+    WHY="no timing samples: $OP exists only in the candidate and has no INTRA pair, so A/B has no counterpart -- R1 is the only verdict this run can give"
+fi
 
 echo
 echo "====================================================================="
-echo "判定  OP=$OP  N=$N   mode=$([ "$IS_INTRA" = 1 ] && echo INTRA-candidate || echo A-B-vs-HEAD)"
+echo "verdict  OP=$OP  N=$N   mode=$([ "$IS_INTRA" = 1 ] && echo INTRA-candidate || echo A-B-vs-HEAD)"
 echo "====================================================================="
-printf "  R1 位级对拍（全尾长 %s）  %s\n" "$gs" "$([ "$GATE_OK" = 1 ] && echo PASS || echo FAIL)"
-printf "  R2 目标规模中位比        median=%s  门槛 %s\n" "$R_MED" "$MIN_GAIN"
-printf "  R3 同向复现 4 比值       min=%s  max=%s  (%s 个进程样本)\n" "$R_MIN" "$R_MAX" "$N_SAMP"
-printf "  R4 增益 vs A/A 地板      gain=%s  floor p50=%s p90=%s max=%s\n" "$GAIN" "$F50DEV" "$F90DEV" "$FMAXDEV"
-printf "  R5 其它规模              min=%s @ n=%s  回退:%s\n" "$SCAN_MIN" "${SCAN_MIN_N:-—}" "${SCAN_BAD:-无}"
+printf "  %-32s %s  (tail lengths %s)\n" "R1 bit-identical" \
+    "$([ "$GATE_OK" = 1 ] && echo PASS || echo FAIL)" "$gs"
+printf "  %-32s median=%s  threshold %s\n" "R2 median ratio at target N" "${R_MED:-n/a (no samples)}" "$MIN_GAIN"
+printf "  %-32s min=%s  max=%s  (%s process samples)\n" "R3 same-direction reproduction" \
+    "${R_MIN:-n/a}" "${R_MAX:-n/a}" "$N_SAMP"
+printf "  %-32s gain=%s  floor p50=%s p90=%s max=%s\n" "R4 gain vs A/A floor" "${GAIN:-n/a}" \
+    "${F50DEV:-n/a}" "${F90DEV:-n/a}" "${FMAXDEV:-n/a}"
+printf "  %-32s min=%s @ n=%s  regressions:%s\n" "R5 other sizes" \
+    "$([ "$NO_SAMPLES" = 1 ] && echo n/a || echo "$SCAN_MIN")" \
+    "${SCAN_MIN_N:-n/a}" "${SCAN_BAD:-none}"
 echo "  -------------------------------------------------------------------"
-printf "  四个比值: $(printf '%s\n' "$RATIOS" | tr '\n' ' ')\n"
-printf "  loadavg 起 %s 止 %s\n" "$LOAD0" "$(cut -d' ' -f1 /proc/loadavg)"
+printf "  ratios: $(printf '%s\n' "$RATIOS" | tr '\n' ' ')\n"
+printf "  loadavg start %s end %s\n" "$LOAD0" "$(cut -d' ' -f1 /proc/loadavg)"
 echo "====================================================================="
-echo "结论: $VERDICT$([ -n "$WHY" ] && echo "  <- $WHY")"
-echo "数据: $VB/p_*.tsv"
+echo "verdict: $VERDICT$([ -n "$WHY" ] && echo "  <- $WHY")"
+echo "data: $VB/p_*.tsv"
 case "$VERDICT" in
     PASS) exit 0;;
     FAIL) exit 1;;
