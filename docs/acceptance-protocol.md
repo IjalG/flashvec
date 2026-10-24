@@ -1,308 +1,426 @@
-# flashvec 验收判据（acceptance protocol）
+# flashvec Acceptance Protocol
 
-> 这份文档回答一个问题：**一条优化凭什么算「被接受」？**
-> 它把「看着快」和「真的快」分开，写清算术口径、可复现性口径和语义口径。
-> 数据来源：`bench/ab/`（同进程 A/B 夹具）、`verify/`（第三方位级对拍与结构检查）、
-> `docs/research/raw/`（原始日志）。本文只引用已验证的数字，未测的部分写「待测」。
+> English | [简体中文](zh-CN/acceptance-protocol.md)
 
-> **`docs/research/raw/` 是每次 `make run` 覆盖的产物，不是不可变存档。**
-> 每次重跑都会重写 `ab_baseline_head.{txt,tsv}`、`_matrix.tsv`、`_smallN.tsv`、`ab_aa_floor.tsv`；
-> 实测同一台机器上「可分辨点数」在四次运行里分别是 90 / 92 / 93 / 107（分母 304），
-> 全点中位比在 1.0063–1.0079 之间。引用时必须连同时刻一起写（header 行有 label/rev，文件 mtime
-> 就是那一轮的时刻），否则会把两个不同轮次的数字混着引用。需要长期对比的结论请抄进
-> `docs/research/` 的分析文档，不要依赖 raw 里的文件。
+> This document answers one question: **what makes an optimization count as "accepted"?**
+> It separates "looks fast" from "is fast", and sets out the arithmetic, reproducibility, and semantics criteria.
+> Data sources: `bench/ab/` (same-process A/B harness), `verify/` (third-party bit-level comparison and structural
+> checks), `docs/research/raw/` (raw logs).
+> Only verified numbers are cited here; anything not yet measured is marked "TBD".
 
-本机：AMD Ryzen 7 5700U（Zen 2，8C/16T，L1d 32 KiB/核、L2 512 KiB/核、
-**L3 4 MiB/CCX × 2 CCX = 8 MiB 芯片总量，单线程可见 4 MiB**、行 64 B）；AVX2+FMA，无 AVX-512。
+> **`docs/research/raw/` is a product that every `make run` overwrites; it is not an immutable archive.**
+> Every re-run rewrites `ab_baseline_head.{txt,tsv}`, `_matrix.tsv`, `_smallN.tsv`, and `ab_aa_floor.tsv`.
+> On the same machine, the measured "resolvable point count" was 90 / 92 / 93 / 107 across four runs
+> (denominator 304), and the all-points median ratio ranged from 1.0063 to 1.0079.
+> When you cite it, cite the moment with it: the header line carries label/rev, and the file mtime is that
+> round's timestamp. Otherwise you end up quoting numbers from two different rounds side by side.
+> Conclusions you need to compare over time belong in an analysis document under `docs/research/`; do not depend
+> on the files in raw.
+
+Test machine: AMD Ryzen 7 5700U, Zen 2, 8C/16T. L1d 32 KiB per core, L2 512 KiB per core,
+**L3 4 MiB/CCX × 2 CCX = 8 MiB total on the chip, 4 MiB visible to a single thread**, 64 B lines.
+AVX2+FMA, no AVX-512.
 
 ---
 
-## 0. 一页版：五条必须同时满足
+## 0. One-page summary: five conditions that must all hold
 
-一条优化（新的批量入口、换指令、换归约写法、加 NT store……）被接受，必须**同时**满足：
+An optimization counts as accepted only if it satisfies all five conditions below **simultaneously**. "Optimization"
+here means changes such as a new batch entry point, different instructions, a different reduction formulation, or an
+added NT store.
 
-| # | 判据 | 不满足意味着什么 |
+| # | Criterion | What failing it means |
 |---|---|---|
-| 1 | **位级对拍通过**：全形态（库内定义 / 头文件 inline / 纯 C 回退）、全尾长（`n = 0..17` 及若干个非 4/8 倍数的规模）、三档编译配置（默认档、`-O3 -march=native`、`-march=native -mfma -ffp-contract=fast`） | 数值契约被改动了。逐元素型入口承诺位模式相同，任何一处不同都是契约破坏，不是「浮点噪声」 |
-| 2 | **目标规模同进程中位比 ≥ 1.15x** | 在采集它的那个规模上没有可测增益。「同进程」是关键：跨进程/跨运行在这台机器上可差 20–25% |
-| 3 | **同向复现**：换测量顺序（AB→BA）或重建二进制后重跑，方向一致且仍 ≥ 1.15x | 单次测量的方向可能是噪声或代码放置的假象（对齐、跨 TU 内联变化） |
-| 4 | 该 (op, size) 点的 **A/A 地板 < 声称的增益**（A/A 地板 = 两份**完全相同**代码的比值偏差） | 增益小于这台机器对同一份代码的分辨率 —— 无法与测量噪声区分 |
-| 5 | **其他规模不回退超过 5%**；预期性回退必须**显式标注**（例如 L2/L3 档的 NT store） | 用一个大数组的收益换小数组的普遍变慢，是负优化 |
+| 1 | **Bit-level comparison passes**: all forms × all tails × three compile settings; each of the three is defined in §1 | The numerical contract has changed. Element-wise entry points promise the same bit pattern; any single difference is a contract break, not "floating-point noise" |
+| 2 | **Same-process median ratio ≥ 1.15x at the target size** | No measurable gain at the size where it was measured. "Same process" is the point: cross-process and cross-run differences on this machine reach 20–25% |
+| 3 | **Same-direction reproduction**: swap the measurement order (AB→BA), or rebuild the binary and re-run; the direction agrees and is still ≥ 1.15x | The direction of one measurement may be noise or an artifact of code placement — alignment, a change in cross-TU inlining |
+| 4 | The **A/A floor** at that (op, size) point is < the claimed gain; A/A floor = the ratio deviation of two pieces of **identical** code | The gain is below this machine's resolution for the same code, so it cannot be separated from measurement noise |
+| 5 | **No other size regresses by more than 5%**; an expected regression must be **explicitly labelled**, e.g. the NT store at the L2/L3 sizes | Trading a win on one large array for a general slowdown on small arrays is a net-negative optimization |
 
-五条之外还有一条方法论（下面 §4 展开）：**单点比值不可信**。判据必须建立在**逐规模中位比**
-与**全点中位比**上，不能用某一个 (op, n) 的单次读数下结论。
+The three parts of criterion 1 are expanded below; each is defined in §1.
+"All forms" means the three forms: library-internal definition, header inline, and the pure-C fallback.
+"All tails" means `n = 0..17` plus a number of sizes that are not multiples of 4 or 8.
+"Three compile settings" means the default setting, `-O3 -march=native`, and
+`-march=native -mfma -ffp-contract=fast`.
 
-对应的自动化入口：`make -C bench/ab verify OP=<op> N=<规模>`（一次跑完并打印逐条判定；
-FAIL 时会说清是哪一条、差多少），细节见 `bench/ab/README.md` §11。
-结构层面的配套检查是 `bash verify/checks.sh`（头文件纯净度、派发位置、禁用内建名、产物级指令普查、
-已废弃内部名不得复活）。
+Beyond the five there is one methodological point, expanded in §4: **a single-point ratio cannot be trusted.** A
+verdict must rest on the **per-size median ratio** and the **all-points median ratio**, never on one reading of one
+(op, n).
 
----
+The automated entry point is `make -C bench/ab verify OP=<op> N=<size>`. It runs everything in one pass and prints a
+verdict per criterion; on FAIL it says which criterion failed and by how much. Details in `bench/ab/README.md` §11.
 
-## 1. R1 位级对拍：为什么必须是「全形态 × 全尾长 × 三档」
-
-- **全形态**：同一份实现在三种形态下必须给同一个结果 —— 库内 `extern` 定义（`FV_USE_EXTERN` /
-  `FV_BUILD`）、头文件 `static inline`（默认）、纯 C 回退（`-DFV_I_NO_INTRINSICS`，走标量）。
-  形态差别会改变内联与指令选择，这正是 FMA 收缩最容易溜进来的地方。
-- **全尾长**：主循环是 `n/4`、`n/8`（vec4 是 `n/2`），尾巴走标量。`n = 0..17` 覆盖所有余数；
-  另外要测 `n` 略大于批量整数倍的边界，以及 `n = 0`、`ptr = NULL`。
-- **三档编译配置**：默认档（`-O3 -fno-math-errno -ffp-contract=off`）、`-O3 -march=native`、
-  以及最狠的 **`-march=native -mfma -ffp-contract=fast`**（消费者自己带 FMA 选项）。
-  头文件用 `#pragma GCC optimize("fp-contract=off")` 守住有收缩风险的入口；
-  这一档就是那条 pragma 的唯一证据 —— 少了它，`vfmadd` 会静默出现。
-
-判等口径：IEEE 位模式 `memcmp`；唯一例外是**两侧都是 NaN**（payload 可不同）判相等并单独计数；
-±0.0 的差异按位如实判不一致。每个输出缓冲区都要有越界写 canary（`o[n..)` 不许被写），
-`_idx` 变体还要检查「未被 idx 引用的 `o[i]` 没有被改写」。
-
-**唯一豁免：`dot_soa`（含 vec3/vec4 版本）**。它用 4 个累加器 + 末端一次归约来打断依赖链，
-归约顺序与逐元素路径不同，所以不做位级判定，只统计误差；但它的**契约必须写清**（见 §5）。
+The companion structural check is `bash verify/checks.sh`. It checks header purity, dispatch placement, banned
+builtin names, a binary-level instruction survey, and that retired internal names do not come back.
 
 ---
 
-## 2. R2/R3 比值与复现：为什么要换顺序、换二进制
+## 1. R1 Bit-level comparison: why "all forms × all tails × all three settings"
 
-- **同进程**：A 与 B 必须在同一个进程里交替跑（A/B/A/B…），否则频率迁移、外部负载、页分配差异
-  会混进比值。本机变频 1.64–3.97 GHz，同一份代码跨运行可差 20–25%。
-- **换顺序（AB → BA）**：抵消「后跑的那个受 cache/频率恢复之利」这类系统性偏差。
-- **换二进制**：同一份源码、只改代码放置（`-falign-functions=64 -falign-loops=32 -falign-jumps=32`），
-  语义零变化。这一条专门关掉「代码放置」这类一次性因素 —— 实测它能给 L1/L2 档带来 5–10% 的差别，
-  而那不是优化。
+- **All forms**: one implementation must give one result in all three forms. The three forms are the library-internal
+  `extern` definition (`FV_USE_EXTERN` / `FV_BUILD`), the header `static inline` (default), and the pure-C fallback
+  (`-DFV_I_NO_INTRINSICS`, which goes scalar). A form difference changes inlining and instruction selection; FMA
+  contraction shows up here most easily.
+- **All tails**: the main loop is `n/4` and `n/8` (`n/2` for vec4), with the tail going scalar. `n = 0..17` covers
+  every remainder. Also test the boundary where `n` is just above an integer multiple of the batch width, plus
+  `n = 0` and `ptr = NULL`.
+- **Three compile settings**: the default setting (`-O3 -fno-math-errno -ffp-contract=off`), `-O3 -march=native`,
+  and the strictest, **`-march=native -mfma -ffp-contract=fast`** — the consumer bringing their own FMA flags.
 
----
+  The header holds contraction-risky entry points down with `#pragma GCC optimize("fp-contract=off")`. This setting
+  is the only evidence for that pragma: remove it and `vfmadd` appears silently.
 
-## 3. R4 A/A 地板：这台机器到底能分辨多小的差别
+The equality criterion: IEEE bit patterns via `memcmp`. The sole exception is when **both sides are NaN**, which are
+judged equal and tallied separately, since the payloads may differ. A ±0.0 difference is reported as unequal, bit for
+bit.
 
-A/A 地板 = **两份完全相同代码**在同一进程、同一规模下交替跑出来的比值偏差（理想值 1.000）。
-它给出这台机器对「同一份代码」的分辨率下限：任何「候选快 r 倍」的结论，只有
-**(r − 1) > floor_dev** 才可能为真。
+Every output buffer needs an out-of-bounds-write canary: nothing in `o[n..)` may be written. `_idx` variants must also
+check that any `o[i]` not referenced by idx is left untouched.
 
-本机一组实测（**某一轮**的 `docs/research/raw/ab_aa_floor.tsv`，304 个大 N 测量点，warm + cold）：
-
-- `floor_dev = |ratio − 1|` 的分布：**29/304 个点 ≥ 15%**，**17/304 个点 ≥ 20%**；
-- 最坏点 0.583（`add_x4` @ 131072，warm）；只看「可分辨」的点，最高 0.312；
-- 也就是说：**15–20% 的地板在这台机器上是常态，极端点还要更差**。声称 1.15x 的优化，
-  在没有 A/A 地板的点上是无法与噪声区分的。
-
-> 上面这几个数（29 / 17 / 最坏点 0.583）和 §4 的可分辨点数一样，都是**某一轮** raw 的读数、
-> 不是常量：同一台机器、同一份代码重跑，可分辨点数在 90 / 92 / 93 / 107 之间漂移（分母恒为
-> 304，见 §4 与文首的 raw 漂移说明）。**结论不依赖具体是哪一轮**：「地板常态 15–20%，
-> 单点因而不可判」这个判断在四次读数里都成立。
-
-配套的两条读数规则：
-
-1. **`resolvable = 0` 的点不要用来判**（配对 IQR ≥ 5%，外部负载把该档咬穿了）。
-2. **优先看 L1/L2 档**：L3 与 DRAM 档的取样变异系数常超 5%，能被外部负载污染。
+**The single exemption: `dot_soa`, including the vec3/vec4 versions.** It uses 4 accumulators plus one final
+reduction at the end to break the dependency chain, so its reduction order differs from the element-wise path; it is
+therefore not judged at the bit level, only its error is tallied. Its **contract must be written down**, see §5.
 
 ---
 
-## 4. 为什么单点比值不可信
+## 2. R2/R3 Ratios and reproduction: why swap the order and swap the binary
 
-这台机器是共享机（loadavg 4–9 / 16 核），L3 与 DRAM 档的取样变异系数常超 5%。一组实测：
-可分辨点数约 **30–35%（四次运行分别为 90 / 92 / 93 / 107，分母恒为 304）** —— 这个数随运行
-漂移，引用请带轮次。「可分辨」的口径是配对 IQR < 5.0%，分母 304 就是大 N 测量点数；
-同一行还会单独报出 cold 档不达标的一批点（见 `docs/research/raw/ab_baseline_head.txt` 的
-「取样稳定性」一行）。
-**四次读数是四次 `make run`，raw 里只留下最后一轮** —— 早期轮次的具体数字只能从本表的记录里
-读到，这也是引用 raw 时必须带时刻的原因。
-
-所以：
-
-- 判据用**逐规模中位比**（每个规模 n 一个比值，取中位）和**全点中位比**（整条扫描线的中位）；
-- 单个 (op, n) 的一次读数只能用来**发问**，不能用来下结论；
-- 报数字时必须同时报：工作集大小、缓存层级、编译选项、是否可分辨（CoV / 配对 IQR）。
-  只报一个「加速比」的数字没有意义。
+- **Same process**: A and B must alternate inside one process (A/B/A/B…). Otherwise frequency migration, external
+  load, and page-allocation differences leak into the ratio. This machine clocks between 1.64–3.97 GHz, and the same
+  code can differ by 20–25% across runs.
+- **Swapping the order (AB → BA)**: cancels systematic bias such as "whichever runs second benefits from a warm cache
+  or a recovered clock".
+- **Swapping the binary**: identical source, only code placement changes
+  (`-falign-functions=64 -falign-loops=32 -falign-jumps=32`); semantics are unchanged. This one isolates one-off
+  factors such as code placement. Measured, it moves the L1/L2 sizes by 5–10%, and that is not an optimization.
 
 ---
 
-## 5. 语义验收：分段不变性（split invariance）
+## 3. R4 A/A floor: how small a difference this machine can actually resolve
 
-这类性质测试套件不会自动覆盖，但调用方一定会踩（分块并行、流式处理、按 chunk 累加）。
+The A/A floor is the ratio deviation produced by **two copies of exactly the same code** alternating in one process at
+one size; the ideal value is 1.000. It gives the lower bound on this machine's resolution for "the same code". Any
+claim that a candidate is r times faster can only be true if **(r − 1) > floor_dev**.
 
-**逐元素型批量入口具备分段不变性**：`add / sub / scale / lerp / madd / len / normalize` 及其
-`_x4` / `_soa` / `_mask` / `_idx` 变体 —— 同一数组切成任意多段分别调用，输出与一次调用**逐位相同**。
+One measured set on this machine, taken from **a single round** of `docs/research/raw/ab_aa_floor.tsv`: 304 large-N
+measurement points, warm + cold:
 
-**归约型入口不具备**：`fv_vec2_dot_soa` / `fv_vec3_dot_soa` / `fv_vec4_dot_soa` 的归约树随切分
-改变。同一份输入的实测：
+- Distribution of `floor_dev = |ratio − 1|`: **29/304 points ≥ 15%**, **17/304 points ≥ 20%**.
+- The worst point is 0.583, at `add_x4` @ 131072 in the warm setting. Restricting to the "resolvable" points, the
+  maximum is 0.312.
+- In other words, **a 15–20% floor is normal on this machine, and the extreme points are worse still**. An
+  optimization claiming 1.15x cannot be told apart from noise at a point without an A/A floor.
 
-| 用例 | 整段一次调用 | 切 2 段分别调用再相加 | 相对差 |
+> Those numbers are 29 / 17 / a worst point of 0.583. Like the resolvable-point count in §4, they are readings from
+> **a single round** of raw, not constants. Re-run the same code on the same machine and the resolvable count drifts
+> between 90 / 92 / 93 / 107 with the denominator fixed at 304; see §4 and the raw-drift note at the top.
+> **The conclusion does not depend on which round it is**: "the floor is normally 15–20%, so a single point is
+> undecidable" held in all four readings.
+
+Two companion reading rules:
+
+1. **Do not judge with points where `resolvable = 0`.** The paired IQR of that size is ≥ 5%; external load has
+   already contaminated it.
+2. **Prefer the L1/L2 sizes**: sampling coefficients of variation in the L3 and DRAM sizes routinely exceed 5% and can
+   be contaminated by external load.
+
+---
+
+## 4. Why a single-point ratio cannot be trusted
+
+This is a shared machine at loadavg 4–9 on 16 cores, and sampling coefficients of variation in the L3 and DRAM sizes
+routinely exceed 5%. One measured set: about **30–35%** of points are resolvable, with 90 / 92 / 93 / 107 across four
+runs and a fixed denominator of 304.
+
+That number drifts from run to run, so cite the round when you cite it. "Resolvable" means paired IQR < 5.0%, and the
+denominator 304 is the count of large-N measurement points. The same row also reports, separately, the group of cold
+points that miss the bar; see the "sampling stability" line in `docs/research/raw/ab_baseline_head.txt`.
+
+**The four readings are four `make run` invocations; raw keeps only the last round.** The specific numbers from
+earlier rounds can only be read from the record in this table — which is exactly why citing raw requires the
+timestamp.
+
+So:
+
+- Judge by the **per-size median ratio** — one ratio per size n, then the median — and by the **all-points median
+  ratio**, the median over the whole sweep line.
+- One reading of a single (op, n) can only **raise a question**; it cannot settle one.
+- Reporting a number means reporting four things with it: working-set size, cache tier, compile flags, and whether it
+  is resolvable (CoV / paired IQR). A bare "speedup" figure means nothing.
+
+---
+
+## 5. Semantic acceptance: split invariance
+
+Test suites do not cover this class of property automatically, but callers always hit it: block-parallel processing,
+streaming, accumulating chunk by chunk.
+
+**Element-wise batch entry points have split invariance**: `add / sub / scale / lerp / madd / len / normalize` and
+their `_x4` / `_soa` / `_mask` / `_idx` variants. Split the same array into any number of segments and call them
+separately: the output is **bit-identical** to a single call.
+
+**Reduction entry points do not**: for `fv_vec2_dot_soa` / `fv_vec3_dot_soa` / `fv_vec4_dot_soa` the reduction tree
+changes with the split. One measured case on identical input:
+
+| Case | One call over the whole range | Split into 2 segments, called separately, then summed | Relative difference |
 |---|---|---|---|
-| `fv_vec2_dot_soa`，n = 1000 | −64.4546509 | −64.4543991 | **≈3.9e-6** |
-| `fv_vec2_dot_soa`，n = 8192 | 79.6643372 | 79.6624146 | **≈2.4e-5** |
-| 对照组 `fv_vec2_add_x4`（同语料、同切分） | — | — | **逐位一致** |
+| `fv_vec2_dot_soa`, n = 1000 | −64.4546509 | −64.4543991 | **≈3.9e-6** |
+| `fv_vec2_dot_soa`, n = 8192 | 79.6643372 | 79.6624146 | **≈2.4e-5** |
+| Control `fv_vec2_add_x4` (same corpus, same split) | — | — | **bit-identical** |
 
-覆盖 12 组语料：`dot_soa` **12/12 全部不一致**，`add_x4` **12/12 逐位一致**（对照组证明实验有效）。
+Across 12 corpora: `dot_soa` is **12/12 non-identical**, `add_x4` is **12/12 bit-identical**. The latter is the
+control, and it shows the experiment is sound.
 
-结论与要求：
+Conclusion and requirements:
 
-- 这是归约的**设计必然，不是缺陷**：归约顺序改变必然改变舍入。
-- 但它**必须写进契约**，否则调用方会以为是浮点噪声：需要「结果与切分无关」的调用方必须用标量
-  `fv_vec2_dot` 顺序累加，或自己固定切分方式。
-- 幅度不小：2.4e-5 约是「n ≤ 1000 相对误差 ≤ 4e-8」的 400 倍。两句话讲的是**两件事**：
-  「与标量路径的差」（头文件里那个误差数字）vs「与另一种切分的差」（本节）。前者不能当后者的上界。
-- 因此**接受一条优化时，`dot_soa` 的位级豁免不等于精度豁免**：它的误差必须按「语料条件 + 绝对误差」
-  报，不能只给一个裸的相对误差，更要说明「分段调用会变」。
+- This is a **design consequence of reduction, not a defect**: changing the reduction order always changes rounding.
+- But it **must be written into the contract**, or callers will take it for floating-point noise. Callers who need
+  "the result is independent of the split" must use the scalar `fv_vec2_dot` with sequential accumulation, or fix
+  the split themselves.
+- The magnitude is not small: 2.4e-5 is roughly 400 times the "relative error ≤ 4e-8 for n ≤ 1000" figure. The two
+  statements are about **two different things**. "The difference from the scalar path" is the error number in the
+  header; "the difference from another split" is this section. The former is not an upper bound on the latter.
+- Therefore, **when accepting an optimization, the bit-level exemption for `dot_soa` is not a precision exemption.**
+  Its error must be reported as "corpus condition + absolute error", never as a bare relative error, and the fact
+  that "a split call will change it" must be stated as well.
 
 ---
 
-## 6. 字节账：名义流量 vs 含 RFO 的真实流量
+## 6. Byte accounting: nominal traffic vs real traffic including RFO
 
-GB/s 用**名义**字节（读 + 写）算会把 `_stream`（NT store）的收益看错：普通 store 在写 miss 时
-要把整条 cache line **先读进来**（RFO, read-for-ownership），真实流量是「写一次 + 读一次」。
+Computing GB/s from **nominal** bytes (read + write) misreads the NT-store gain of `_stream`. On a write miss an
+ordinary store must **first read in** the entire cache line; that step is RFO, read-for-ownership. Real traffic is
+"one write plus one read".
 
-| 入口 | 名义 B/元素 | 真实 B/元素 | 说明 |
+| Entry point | Nominal B/element | Real B/element | Notes |
 |---|---|---|---|
-| `add_x4` / `sub_x4` / `lerp_x4` / `madd_x4` / `add_soa` | 24（16 读 + 8 写） | **≈32**（+8 RFO） | 输出数组被多读一遍 |
-| `scale_x4` / `scale_soa` | 16（8 读 + 8 写） | ≈24（+8 RFO） | 同上，少一路读 |
-| `dot_soa`（vec2 / vec3 / vec4） | **16**（ax/ay/bx/by 四条 `float` 数组 × 4 B） | 16（纯读，不写 → 无 RFO） | **不是 32 B**：每元素只读 4 个 float |
-| `normalize_soa` | **16**（8 读 + 8 写） | ≈24（+8 RFO） | **不是 16+16** |
-| `*_stream`（NT store） | 24（与普通版相同） | **24**（无 RFO） | 真实收益是**少走 25% 的字节**，不是每字节更快 |
+| `add_x4` / `sub_x4` / `lerp_x4` / `madd_x4` / `add_soa` | 24 (16 read + 8 write) | **≈32** (+8 RFO) | the output array is read one extra time |
+| `scale_x4` / `scale_soa` | 16 (8 read + 8 write) | ≈24 (+8 RFO) | as above, one read stream fewer |
+| `dot_soa` (vec2/vec3/vec4) | **16** (four `float` arrays ax/ay/bx/by × 4 B) | 16 (pure read; no write, no RFO) | **not 32 B**: only 4 floats are read per element |
+| `normalize_soa` | **16** (8 read + 8 write) | ≈24 (+8 RFO) | **not 16+16** |
+| `*_stream` (NT store) | 24 (same as the ordinary version) | **24** (no RFO) | the real gain is **25% fewer bytes moved**, not faster bytes |
 
-两条判据：
+Two criteria:
 
-1. 同一算子普通版与 `_stream` 版的**真实** GB/s 应基本相等（都顶在 DRAM 带宽上），而**名义**
-   GB/s 差 1.33 倍。若名义与真实都差 1.33 倍，说明增益不是流量带来的 —— 这是识别假阳性的一把尺子。
-2. NT store 只在**工作集远超 L3、写流是干净的一次性写**时才有这 25%；工作集落在 L2/L3 里时它比
-   普通版慢 **2–8 倍**（L2 内实测 **0.13–0.51x**，6 个入口全部判 FAIL(变慢)；见 §9 第 2 条）。
+1. For the same operator, the **real** GB/s of the ordinary version and of the `_stream` version should be roughly
+   equal — both sit at the DRAM bandwidth limit — while the **nominal** GB/s differ by 1.33 times. If both nominal
+   and real differ by 1.33 times, the gain is not coming from traffic. This is the ruler for spotting false
+   positives.
+2. NT stores only deliver that 25% of bytes when the **working set is far beyond L3 and the write stream is a
+   clean, one-shot write**. When the working set lands in L2/L3, they are **2–8 times** slower than the ordinary
+   version: measured inside L2 at **0.13–0.51x**, with all 6 entry points judged FAIL (slower), see §9 item 2.
 
-这也是**拐点**必须用真实流量再算一遍的原因：`add` 名义 24 B/元素对应 4 MiB ÷ 24 B ≈ 1.75×10⁵ 元素，
-按真实 32 B/元素算还要更早（约 1.3×10⁵）。
-
----
-
-## 7. 缓存口径（报数字的前置条件）
-
-本机 L3 是 **4 MiB/CCX × 2 CCX = 8 MiB 芯片总量**，`/sys/devices/system/cpu/cpu0/cache/index3` 报
-`level=3, size=4096K, shared_cpu_list=0-7`。**单线程只吃得到自己那 4 MiB**。
-
-- 说「L3 8 MiB 共享」是错的：8 MiB 是芯片总量，不是单线程可用量。
-- 拐点按 4 MiB 算：`1.75×10⁵` 个活跃元素 @ 24 B/元素（旧文档按 8 MiB 算成 `3×10⁵`，高了一倍）。
-- 有直接实测：同进程 A/B 夹具在 **2^17（工作集 3 MB）38–57 GB/s**、**2^18（6 MB）5.6–8.8 GB/s**，
-  断崖正好压在这条线上。
-- 本仓库的一致性检查（`bash verify/checks.sh` 的 [7] 段）每次都会打印 `index3` 的实测值，
-  以免文档与机器再次漂移。
+This is why the **knee** must be recomputed with real traffic. For `add`, nominal 24 B/element gives
+4 MiB ÷ 24 B ≈ 1.75×10⁵ elements. On real 32 B/element the knee comes earlier still, at about 1.3×10⁵.
 
 ---
 
-## 8. 未取得可信数据的地方（不要引用成数字）
+## 7. Cache accounting (a precondition for reporting numbers)
 
-- 三维 SoA 批量（`fv_vec3_*_soa`）与四维 `_x2` / `_soa` 批量**相对标量**的加速比：**待测**。本轮只测了
-  它们的**形态差**（库内定义 vs 头文件内联，13 个入口 × 5 档规模 = 65 点）：5 PASS / 8 FAIL(变慢)
-  / 52 INCONCLUSIVE，读数 0.97–1.93 —— 那些数只能读作形态，不能当加速比引用（见 §9 第 5 条）。
-- `AoS↔SoA 拆装成本`：仍未实测，直接影响「SoA 入口值不值得」。
-- 非 AVX2 硬件上的标量回退路径：本机有 AVX2，无法强制 `__builtin_cpu_supports("avx2") == 0`，
-  目前只有结构性证据（`verify/checks.sh` 的 [9] 段：基线档里内核仍在、派发走 `__cpu_model` 的
-  avx2 位）。真实非 AVX2 机器上未运行过。
+L3 on this machine is **4 MiB/CCX × 2 CCX = 8 MiB total on the chip**.
+`/sys/devices/system/cpu/cpu0/cache/index3` reports `level=3, size=4096K, shared_cpu_list=0-7`.
+**A single thread only ever gets its own 4 MiB.**
 
----
-
-## 9. 走不通的路（留档：别再重做）
-
-这一节记的是**已被实测否决**的方向 —— 不是「还没试」，而是「试过了，结论是否定的」。重做之前先读这里，
-并给出「这次为什么不一样」的物理理由；说不出理由就不要重跑，那只是在噪声里再捞一次。每条都带证据位置。
-
-1. **`_mask_inplace` 的就地写没有吞吐收益（全档 INCONCLUSIVE）**。5 种密度（1% / 5% / 20% / 50% / 95%）
-   × 4 档规模 = 20 个点，增益 **-0.10…+0.00**，同轮 A/A 地板 **1.06–1.56**；campaign 判定表里它的
-   4 个规模点也全是 INCONCLUSIVE（4M 档增益 -0.41、地板 1.48）。
-   **原因在流量账上**：就地写的目标数组本来就要先读后写，对应的 cache line 已在 cache 里，普通 store
-   在这种情形下**不产生 RFO** —— 「就地」省掉的是 **0 B**，不是 8 B/元素。所以它的价值是**形态**
-   （省一块输出缓冲、少一次分配），不是速度；不要用它换吞吐。
-   证据：`docs/research/raw/ab_campaign_verdict.txt`、`bench/ab/README.md` §10.8。
-
-2. **NT store 在 L2/L3 内是 0.13–0.51x（慢 2–8 倍）**。`_stream` 的 6 个入口在 n=8192（工作集
-   128–192 KiB，L2 内）实测 `add` 0.217 / `sub` 0.301 / `scale` 0.130 / `add_soa` 0.229 /
-   `scale_soa` 0.138 / `normalize_soa` 0.506，**6/6 判 FAIL(变慢)**。它只在工作集**远超 L3**、
-   且写流是干净的一次性写时才有那 25% 的字节（§6），并且必须由调用方**显式选择**，库永不自动切换。
-   反过来也不是「L3 之外总有效」：1M/8M 档 PASS（1.29–1.58x），4M 档 6/6 INCONCLUSIVE（地板 > 15%），
-   n=131072 是黑名单档。证据：同 §1 + `include/flashvec.h` 的 `_stream` 契约。
-
-3. **VMASKMOVPS（`maskload` / `maskstore`）在 Zen 2 上是微码级慢指令，这条路已从库里删掉**。
-   两个内部名 `fv_i_maskload_add4_avx2` / `fv_i_maskstore_add4_avx2` 标为**已废弃**，
-   `bash verify/checks.sh` 的第 [11] 条规则要求它们在整仓出现 **0 次** —— 想复活会当场被门禁拦下。
-   与数字无关的那条理由更重要：用它们，「未命中 lane 是否被物理写」会变成**随掩码密度变化**的性质，
-   没有调用方能依赖一个随输入分布变化的存储保证。早期探针的数量级（同密度比整条 `storeu` 慢
-   1.2–3.8x）本轮**未复测**，只按量级读。证据：`verify/checks.sh` [11]、`include/flashvec.h` 契约。
-
-4. **分段不变性（split invariance）在归约型入口上不成立** —— 这是设计必然，不是缺陷，但**必须写进
-   契约**：`fv_vec2_dot_soa` / `fv_vec3_dot_soa` / `fv_vec4_dot_soa` 的归约树随切分改变，
-   n=8192「整段 vs 切两段再相加」相对差 **2.4e-5**、n=1000 约 **3.9e-6**，12/12 全部不一致
-   （对照组的 `add_x4` 同语料 12/12 逐位一致）。需要「结果与切分无关」的调用方必须用标量
-   `fv_vec2_dot` 顺序累加。证据：§5 的表、`include/flashvec.h` 的契约。
-
-5. **「内联形态」本身 ≠ 更快**。把实现从「库内定义」换成「头文件内联」只改代码放置，算法零变化。
-   本轮以 intra 模式（A/B 只差这一个变量）测了 13 个三维/四维入口 × 5 档规模 = 65 个点：
-   **5 PASS / 8 FAIL(变慢) / 52 INCONCLUSIVE**。就在最小的一档（n=8192）里，**同一份源码**的读数
-   从 **0.97（读成慢 3%）到 1.93（读成快 93%）** 全都有：0.97 说明「内联也能被读成变慢」，
-   1.93 说明「只换形态也能读出接近 2 倍的假增益」。同一现象的另一面是同轮 A/A 地板 —— 4M 档那份
-   **完全相同**的代码，两侧比值能到 **1.34–1.61**，即只换目标文件布局就能读出 1.5 量级。
-   所以任何「因为内联所以更快」的结论都必须过 R3（同向复现）+ R4（同轮 A/A 地板）；
-   单点比值只能用来发问，不能当证据。证据：`docs/research/raw/ab_campaign_verdict.txt`（intra 行）。
-
-6. **`_idx` 软件预取无效**。实测（三种下标分布 × 三档规模 {65536, 1M, 8M} × 三个预取距离
-   {4, 8, 16} × 两种 hint {T0, NTA}）：**随机分布 0 PASS / 30 点全 INCONCLUSIVE**（夹具，完整表 30 行）；
-   **三分布合计 0 PASS / 2 个可分辨的变慢 / 52 个 INCONCLUSIVE**（自建的同进程 A/B 驱动，54 行）。
-   R1 位级对拍 8/8 通过（宏开 × 四形态 × 两种 hint，175 296 字节主输出流逐字节相同）——
-   **预取没改语义，纯粹没有性能**。
-   能分辨的点（配对 IQR < 5%、同轮地板 ≤ 15%）的实际读数：
-   - 8M **随机**（最延迟受限的一档）增益 **+0.3% … +1.9%**（也有 -1.8%），同轮地板 1.5%–4.6%；
-     D=4/8/16 与 T0/NTA 之间没有可分辨差别。
-   - 65536 **有序递增** 是 **0.606x**、**分块聚类**（每 64 个下标聚在一个 4 KB 窗口）是 **0.700x**
-     —— 回退 39% / 30%，是 R5（>5% 就不接受）的 6–8 倍，且 R3 同向（D=8 与 D=16 两次独立构建）。
-     `_MM_HINT_NTA` 在 65536 更差：**0.12–0.41x**。
-   - 65536 随机档看着有 1.11–1.24 的"增益"，但**同轮 A/A 地板本身就是 1.48–1.93**（三次重复的
-     ratio 1.115 / 1.150 / 1.157，地板 p90 偏差 0.48 / 0.93 / 0.57）—— 那一档是这台机器最毒的点
-     之一，按 R4 必须判 INCONCLUSIVE。
-   **原因（从数据里读出来的）**：
-   - 随机分布下瓶颈不是"提前量不够"，而是**未完成 miss 的并行度**：8M 档每元素 55–60 ns
-     （20 B/元素 ≈ 0.34 GB/s ≈ 一个 DRAM 延迟 ÷ 1.5 个并发）。预取项与需求缺失抢的是同一批
-     miss 槽位（L1 fill buffer），它把同一批访问**提前**发出，却不增加并行度 —— 所以增益为零；
-     这也解释了为什么扫距离与 hint 都扫不出东西（换提前量不改变槽位数）。
-   - 有序/分块分布下工作集在 L1/L2 里，硬件预取器本来就覆盖；此时循环是**发射受限**而不是延迟受限，
-     每元素多 1–2 条 prefetch µop 直接换成 25–40% 的吞吐损失。NTA 更糟："非临时"通路对**反复使用**
-     的行等于自伤（留在 L1 里却被降级/挤掉）。
-   - 于是这条路的物理上限 = "把 latency-bound 变成 MLP-bound" 的那一段，而这一段已经被 OoO 窗口
-     拿走了（实测 MLP ≈ 1.5–2）。再往上只能改**数据布局**（先把下标分批/排序再顺序访问，即调用方
-     做 gather 的预处理）—— 那不是批量入口能做的事。
-   证据与复现：夹具 `bench/ab`（A = 同一棵树的 `FV_I_IDX_PREFETCH=0`，B = 同一棵树的 `=1`；
-   用 `bench/ab/mkrename.sh` + 同一份 `ab_variant.cpp` 编出 `var_a.o/var_b.o` 复用驱动，
-   带 `--aa-each-round`）：`bench/ab/build/idxpf/sweep_random.tsv`（30 点）、
-   `bench/ab/build/idxpf/chk_{1,2,3}.tsv`（65536 随机档三次重复）、
-   `pf_D8T0_fv_vec2_{add,scale}_x4_idx.tsv`（粗筛那一对）。三分布那 54 点用的一次性驱动
-   （两份 `tests/idxpf_side.c` 包装 TU + `tests/idxpf_dist.c`，ABBA 方案 + 每轮同构 A/A）已随实现
-   一起删除；数据留在 `bench/ab/build/idxpf/dist/dist_sweep.tsv` 与 `dist/run_{8_0,16_0,8_1}.log`。
-   实现（`FV_I_IDX_PREFETCH` / `FV_I_IDX_PF_DIST` / `FV_I_IDX_PF_HINT` 三个宏 + 两个 `_idx` 循环里的
-   预取分支）**已整体删除**，头文件恢复原状（`grep -c IDX_PREFETCH include/flashvec.h` = 0）；
-   复核 `make test-header` / `make test-inline` / `bash verify/checks.sh`（11 条规则 FAIL=0）。
-
-**用法**：如果新方案与上面某条同构，先说明「流量账 / 微架构 / 语义」哪一层的假设变了；说不出来就回到
-§0 的五条判据，按「先建夹具、再动手」的路子做 —— `bench/ab` 里的这条负结果（§1）就是夹具先行抓出来的。
+- Saying "L3 is 8 MiB shared" is wrong: 8 MiB is the total on the chip, not what one thread can use.
+- Compute the knee from 4 MiB: `1.75×10⁵` active elements @ 24 B/element. Older documentation used 8 MiB and got
+  `3×10⁵`, twice too high.
+- There is direct measurement: the same-process A/B harness gives **38–57 GB/s at 2^17 (working set 3 MB)** and
+  **5.6–8.8 GB/s at 2^18 (6 MB)** — the cliff sits exactly on this line.
+- This repository's consistency check prints the measured `index3` value every time, in section [7] of
+  `bash verify/checks.sh`, so that documentation and machine cannot drift apart again.
 
 ---
 
-## 10. 已知局限（现行判据的偏差方向，未修）
+## 8. Where no trustworthy data exists (do not cite it as numbers)
 
-§9 记的是「试过并被否决的方案」，这一节记的是**判据本身的问题**：它们没有被修掉，所以每一条都
-限定了上面的 PASS 到底能证明什么。判据实现见 `bench/ab/README.md`（§10.7 逐规模判据、
-§11 验收判据、§13 作者自列的六个漏洞）。
+- Speedup **relative to scalar** for the three-component SoA batch (`fv_vec3_*_soa`) and the four-component
+  `_x2` / `_soa` batch: **TBD**.
 
-- **档级判据偏松（已知、未修）**：自检的档级规则用「该档全部点的中位比」去比「单点 A/A 地板
-  的 p90」（`|该档中位比 − 1| ≤ 该档地板 p90`）。15 个点的中位数标准误约为单点的 1/√15
-  （≈1/4，`bench/ab/ab_bench.cpp` 的注释自己写的就是「15 个样本的中位数，标准误约等于单点噪声
-  的 1/4」），所以这条规则会放过比真实档级噪声更大的偏离 —— 拿一个「已经平均掉大部分噪声的数」
-  去比一把「按单次读数定刻度」的尺子，方向必然是松的。
-  未按 √N 收紧的理由：收紧需要一个关于**点间独立性**的额外假设（15 个算子的噪声并非独立同分布，
-  它们共享同一段频率漂移与同一批外部负载），而档级规则只是**健康检查**，不是证据 —— 真正的判据
-  是逐点的 R2/R3/R4。**不要把「档级 PASS」当成「这个优化有效」的证据。**
-- **A/A 地板只度量 A 侧的噪声**（A vs A），而 A/B 比值的噪声还含 B 侧；两侧噪声不同时地板会
-  低估抖动。也就是说地板是**下界**：地板小不等于这个点可判，只等于「A 侧自己跟自己」能分辨。
-- **INTRA 模式的地板用参照 op 打**（ref vs ref），不是 new vs new，存在「用一个 op 的噪声代表
-  另一个 op」的问题。新入口与参照 op 的访存形态、尾巴长度、寄存器压力都可能不同，地板的量级
-  不能假设可以搬过去。
-- **档级地板本身在轮次之间会翻倍**（实测 65536 档：0.130 / 0.169 / 0.218），同一档能在「可判」
-  与「INCONCLUSIVE」之间翻转 —— 现行 raw 留下的那一轮里 n=65536 warm 的地板就是 **0.218**，
-  已经触发「地板 > 20% → 该档 INCONCLUSIVE」的兜底，而同一个档在另两轮只有 0.130 / 0.169。
-  所以只有「**逐点 PASS 且该点地板小**」才算硬结论；「整档 PASS」在下一轮重跑里就可能变成
-  INCONCLUSIVE，它描述的是一次测量，不是一个性质。
+  This round measured only their **form difference**, i.e. library-internal definition vs header inline, over
+  13 entry points × 5 sizes = 65 points: 5 PASS / 8 FAIL (slower) / 52 INCONCLUSIVE, readings 0.97–1.93.
+  Those numbers may only be read as form, never cited as speedup; see §9 item 5.
+- `AoS↔SoA pack/unpack cost`: still unmeasured, and it directly decides whether the SoA entry points are worth it.
+- The scalar fallback path on non-AVX2 hardware: this machine has AVX2, so `__builtin_cpu_supports("avx2") == 0`
+  cannot be forced. Only structural evidence exists, namely section [9] of `verify/checks.sh`: the kernel is still
+  present in the baseline setting, and dispatch goes through the avx2 bit of `__cpu_model`. It has never run on a
+  real non-AVX2 machine.
 
-一句话：上面四条都在说同一件事 —— **档级/汇总层面的 PASS 是夹具在做健康检查，逐点的 R2/R3/R4
-才是证据**。任何「因为整档 PASS，所以这个优化有效」的推论都在这条边界之外。
+---
+
+## 9. Dead ends (recorded so that nobody redoes them)
+
+This section records directions **already rejected by measurement**. It is not "not tried yet" but "tried, and the
+answer was no". Read it before redoing anything, and give the physical reason why "this time is different". If you
+cannot give one, do not re-run; a re-run only buys another noisy reading. Every item carries the location of its
+evidence.
+
+1. **The in-place write of `_mask_inplace` brings no throughput gain; every size is INCONCLUSIVE.** 5 densities
+   (1% / 5% / 20% / 50% / 95%) × 4 sizes = 20 points, gains **-0.10…+0.00**, same-round A/A floor **1.06–1.56**.
+
+   Its 4 size points in the campaign verdict table are all INCONCLUSIVE too: -0.41 gain and 1.48 floor at the 4M
+   size. **The reason lies in the byte accounting.** The target array of an in-place write already has to be read
+   before it is written, so the corresponding cache lines are in cache, and an ordinary store **produces no RFO** in
+   that situation.
+
+   In-place saves **0 B**, not 8 B/element. Its value is therefore **form** — one output buffer fewer, one
+   allocation fewer — not speed; do not use it to buy throughput.
+   Evidence: `docs/research/raw/ab_campaign_verdict.txt`, `bench/ab/README.md` §10.8.
+
+2. **NT stores inside L2/L3 run at 0.13–0.51x, 2–8 times slower.**
+
+   The 6 `_stream` entry points measured at n=8192, where the working set is 128–192 KiB and lands inside L2:
+   `add` 0.217 / `sub` 0.301 / `scale` 0.130 / `add_soa` 0.229 / `scale_soa` 0.138 / `normalize_soa` 0.506 —
+   **6/6 judged FAIL (slower)**. Only a working set **far beyond L3** with a clean, one-shot write stream gets that
+   25% of bytes, see §6.
+
+   And the choice must be made **explicitly by the caller**; the library never switches on its own. Nor is it
+   "always effective beyond L3": the 1M/8M sizes PASS (1.29–1.58x), the 4M size is 6/6 INCONCLUSIVE (floor > 15%),
+   and n=131072 is a blacklisted size. Evidence: as in §1, and the `_stream` contract in `include/flashvec.h`.
+
+3. **VMASKMOVPS (`maskload` / `maskstore`) is a microcode-level slow instruction on Zen 2; this path has been
+   removed from the library.** The two internal names `fv_i_maskload_add4_avx2` / `fv_i_maskstore_add4_avx2` are
+   marked **retired**.
+
+   Rule [11] of `bash verify/checks.sh` requires **0 occurrences** across the whole repository; reviving them is
+   caught by the gate on the spot. The reason that has nothing to do with numbers matters more. With them, "whether
+   a missed lane is physically written" becomes a property that **varies with mask density**, and no caller can
+   depend on a store guarantee that shifts with the input distribution.
+
+   Early probes put them at 1.2–3.8 times slower than a plain `storeu` at the same density; this round **did not
+   re-measure**, so read that as an order of magnitude only. Evidence: `verify/checks.sh` [11], the
+   `include/flashvec.h` contract.
+
+4. **Split invariance does not hold for reduction entry points.** This is a design consequence, not a defect, but it
+   **must be written into the contract**: for `fv_vec2_dot_soa` / `fv_vec3_dot_soa` / `fv_vec4_dot_soa` the
+   reduction tree changes with the split.
+
+   At n=8192 the relative difference between "the whole range" and "two segments summed" is **2.4e-5**; at n=1000
+   it is about **3.9e-6**; 12/12 are non-identical. The control `add_x4` is 12/12 bit-identical on the same corpus.
+   Callers who need "the result is independent of the split" must use the scalar `fv_vec2_dot` with sequential
+   accumulation.
+
+   Evidence: the table in §5, and the contract in `include/flashvec.h`.
+
+5. **The "inline form" is not faster in itself.** Moving an implementation from "library-internal definition" to
+   "header inline" changes only code placement; the algorithm does not change at all.
+   This round measured 13 three- and four-component entry points × 5 sizes = 65 points in intra mode, where intra
+   mode means A and B differ in this one variable. The result: **5 PASS / 8 FAIL (slower) / 52 INCONCLUSIVE**.
+
+   In the smallest size alone, n=8192, readings for **the same source** run the whole way from **0.97 to 1.93**.
+   Reading 0.97 as 3% slower shows that "inlining can also read as slower"; reading 1.93 as 93% faster shows that
+   "changing only the form can read out an almost 2-fold false gain".
+
+   The other face of the same phenomenon is the same-round A/A floor: for that **identical** code at the 4M size,
+   the ratio across the two sides reaches **1.34–1.61** — changing only the object-file layout reads as roughly
+   1.5-fold. So any "it is faster because it is inlined" conclusion must clear R3 (same-direction reproduction) and
+   R4 (same-round A/A floor). A single-point ratio can only raise a question; it cannot serve as evidence.
+
+   Evidence: the intra rows of `docs/research/raw/ab_campaign_verdict.txt`.
+
+6. **`_idx` software prefetch does nothing.** The measured configuration was three index distributions × three
+   sizes {65536, 1M, 8M} × three prefetch distances {4, 8, 16} × two hints {T0, NTA}.
+   **Random distribution: 0 PASS / 30 points, all INCONCLUSIVE**, from the harness, full table of 30 rows.
+
+   **All three distributions combined: 0 PASS / 2 resolvable regressions / 52 INCONCLUSIVE**, from a purpose-built
+   same-process A/B driver, 54 rows. R1 bit-level comparison passed 8/8: macro on × four forms × two hints, with
+   the 175 296-byte main output stream byte-for-byte identical. **Prefetch changed no semantics; it simply has no
+   performance.**
+
+   Resolvable points mean paired IQR < 5% and same-round floor ≤ 15%; the actual readings at those points follow.
+   - The 8M **random** size is the most latency-limited of the sizes: gains **+0.3% … +1.9%**, and -1.8% as well;
+     same-round floor 1.5%–4.6%. Nothing resolvable separates D=4/8/16 or T0/NTA.
+   - 65536 **ordered ascending** is **0.606x**, **blocked clustering** is **0.700x**, the latter grouping every
+     64 indices into one 4 KB window. That is a 39% / 30% regression — 6–8 times the R5 criterion (anything above
+     5% is rejected), consistent in direction under R3, and coming from two independent builds, D=8 and D=16.
+
+     `_MM_HINT_NTA` is worse still at 65536: **0.12–0.41x**.
+   - The 65536 random size looks like it has a 1.11–1.24 "gain", but the **same-round A/A floor is itself
+     1.48–1.93**. Across three repeats the ratios are 1.115 / 1.150 / 1.157, with floor p90 deviations of
+     0.48 / 0.93 / 0.57. That size is one of the hardest points to judge on this machine; under R4 it must be
+     judged INCONCLUSIVE.
+
+   **The reason is read out of the data**:
+   - Under a random distribution the bottleneck is not "not enough lookahead" but **the parallelism of outstanding
+     misses**. At the 8M size, 55–60 ns per element, i.e. 20 B/element ≈ 0.34 GB/s ≈ one DRAM latency ÷ 1.5
+     concurrent accesses. Prefetch requests compete for the same miss slots as demand misses, that is, the L1 fill
+     buffer.
+
+     It issues the same accesses **earlier** without adding parallelism, so the gain is zero. That also explains why
+     sweeping distance and hint turns up nothing: changing the lookahead does not change the number of slots.
+   - Under the ordered and blocked distributions the working set is in L1/L2, which the hardware prefetcher already
+     covers. There the loop is **issue-limited**, not latency-limited, and 1–2 extra prefetch µops per element
+     convert straight into a 25–40% throughput loss. NTA is worse: the "non-temporal" path is harmful for lines
+     that are **used repeatedly**, which stay in L1 yet get demoted or pushed out.
+   - So the physical ceiling of this path is the stretch that turns latency-bound into MLP-bound, and that stretch
+     has already been taken by the out-of-order window: measured MLP ≈ 1.5–2. Going further requires changing the
+     **data layout** — batching or sorting the indices first, then walking them sequentially — which is
+     preprocessing that belongs to the gather performed by the caller. That is not something a batch entry point can
+     do.
+
+   Evidence and reproduction. The harness is `bench/ab`: A comes from the same tree with `FV_I_IDX_PREFETCH=0`, B
+   from the same tree with `=1`. Compile `var_a.o` and `var_b.o` from the same `ab_variant.cpp` using
+   `bench/ab/mkrename.sh` and reuse the driver, with `--aa-each-round`.
+
+   The data is in three files:
+   - `bench/ab/build/idxpf/sweep_random.tsv`, 30 points.
+   - `bench/ab/build/idxpf/chk_{1,2,3}.tsv`, three repeats of the 65536 random size.
+   - `pf_D8T0_fv_vec2_{add,scale}_x4_idx.tsv`, the pair from the coarse sweep.
+
+   The one-off driver behind the 54 points of the three-distribution run was deleted together with the
+   implementation. That driver was two `tests/idxpf_side.c` wrapper TUs plus `tests/idxpf_dist.c`, running an ABBA
+   scheme with a homogeneous A/A on every round.
+
+   The data remains in `bench/ab/build/idxpf/dist/dist_sweep.tsv` and `dist/run_{8_0,16_0,8_1}.log`.
+
+   The implementation was **deleted wholesale** as well: the three macros `FV_I_IDX_PREFETCH` / `FV_I_IDX_PF_DIST` /
+   `FV_I_IDX_PF_HINT`, plus two prefetch branches in the `_idx` loops. The header is back to its original state;
+   `grep -c IDX_PREFETCH include/flashvec.h` = 0.
+
+   Re-checked with `make test-header` / `make test-inline` / `bash verify/checks.sh`: 11 rules, FAIL=0.
+
+**How to use this**: if a new proposal is structurally the same as one of the items above, first say which layer's
+assumption changed — byte accounting, microarchitecture, or semantics. If you cannot say, go back to the five criteria
+in §0 and work the "build the harness first, then touch code" way.
+The negative result in `bench/ab` (§1) was caught exactly by building the harness first.
+
+---
+
+## 10. Known limitations (which way the current criteria are biased; unfixed)
+
+§9 records "approaches that were tried and rejected"; this section records **problems with the criteria themselves**.
+They have not been fixed, so each one limits what a PASS above actually proves. The criteria are implemented per
+`bench/ab/README.md`: §10.7 the per-size criterion, §11 the acceptance criteria, §13 the six holes the author lists.
+
+- **The per-size criterion is loose (known, unfixed).** The self-check's per-size rule compares "the median ratio of
+  all points in that size" against "the p90 of the single-point A/A floor", i.e.
+  `|size median ratio − 1| ≤ that size's floor p90`. The standard error of a median over 15 points is about 1/√15
+  of a single point's, i.e. ≈1/4.
+
+  The comment in `bench/ab/ab_bench.cpp` says exactly that: "the median of 15 samples has a standard error of about
+  1/4 of the single-point noise". So the rule lets through deviations larger than the true per-size noise: it
+  measures a number that has already averaged most of the noise away against a ruler graduated from a single
+  reading, and so it is necessarily loose. Why it was not tightened by √N: tightening needs an extra assumption
+  about **independence between points**.
+
+  The noise of 15 operators is not independent and identically distributed; they share the same stretch of frequency
+  drift and the same external load. And the per-size rule is only a **health check**, not evidence — the real
+  criteria are R2/R3/R4 point by point. **Do not take "per-size PASS" as evidence that "this optimization works".**
+- **The A/A floor only measures noise on the A side**, i.e. A vs A, while the noise in an A/B ratio also contains the
+  B side. When the two sides differ in noise, the floor underestimates jitter. That is, the floor is a **lower
+  bound**: a small floor does not mean the point is decidable, only that "A against itself" is resolvable.
+- **The INTRA-mode floor is struck against a reference op**, i.e. ref vs ref, not new vs new, which raises the
+  problem of representing one op's noise with another's. A new entry point and the reference op may differ in memory
+  access pattern, tail length, and register pressure, so the floor's magnitude cannot be assumed to carry over.
+- **The per-size floor itself doubles between rounds.** Measured at the 65536 size: 0.130 / 0.169 / 0.218. The same
+  size can flip between "decidable" and "INCONCLUSIVE".
+
+  In the round that the current raw left behind, the n=65536 warm floor is **0.218**, which has already tripped the
+  "floor > 20% → this size is INCONCLUSIVE" fallback, while the same size was only 0.130 / 0.169 in the other two
+  rounds. So only "**a per-point PASS whose floor is small**" counts as a hard conclusion.
+
+  A "whole-size PASS" may become INCONCLUSIVE the next time you re-run; it describes one measurement, not a
+  property.
+
+One sentence to close: all four items above say the same thing. **A PASS at the size or aggregate level is the
+harness doing a health check; only the per-point R2/R3/R4 is evidence.** Any inference of the form "the whole size
+passed, so this optimization works" lies outside that boundary.

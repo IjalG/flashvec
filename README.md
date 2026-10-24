@@ -1,13 +1,15 @@
 # flashvec
 
-一个很小的向量基础库，面向 2D / 3D / 4D 实时计算。
+> English | [简体中文](zh-CN/README.md)
 
-- 全部按值传递，库内不分配内存，没有全局状态。
-- 头文件是纯 C 接口，C 和 C++ 都能直接包含。
-- 提供标量和批量两套 API。标量用于正确性基线，批量用于热路径。
-- 默认路径逐位可复现：同样的输入永远给出同样的位模式。
+A small vector math library for real-time 2D / 3D / 4D computation.
 
-## 快速开始
+- Every value is passed by value. The library never allocates and holds no global state.
+- The header is a pure C interface. It can be included from both C and C++.
+- Two APIs: scalar for correctness baselines, batch for hot paths.
+- The default path is bit-for-bit reproducible: identical input always yields identical output bits.
+
+## Quick start
 
 ```c
 #include "flashvec.h"
@@ -16,135 +18,159 @@ fv_vec2 a = fv_vec2_make(3, 4);
 fv_vec2 n = fv_vec2_normalize(a);   /* (0.6, 0.8) */
 fv_real d = fv_vec2_len(a);         /* 5 */
 
-/* 批量：一次处理整个数组 */
+/* Batch: one call processes a whole array */
 fv_vec2 pos[N], vel[N];
 fv_vec2_add_x4(pos, vel, pos, N);
 ```
 
-在自己的项目里使用：把 `include/` 加进头文件搜索路径。默认形态完全由头文件提供实现，不需要链接库。想用预编译库的形态，就定义 `FV_USE_EXTERN` 并链接 `libflashvec.a`。
+To use it, add `include/` to your header search path. By default the header contains the entire
+implementation, so nothing needs to be linked. To use the prebuilt library instead, define
+`FV_USE_EXTERN` and link `libflashvec.a`.
 
-## 类型
+## Types
 
-| 类型 | 大小 | 说明 |
+| Type | Size | Notes |
 |---|---|---|
 | `fv_vec2` | 8 B | |
-| `fv_vec3` | 12 B | 不加 padding，保持用户既有布局 |
-| `fv_vec4` | 16 B | `static_assert` 锁死大小 |
-| `fv_aabb2` | 16 B | 轴对齐包围盒 |
+| `fv_vec3` | 12 B | No padding, so existing layouts stay valid |
+| `fv_vec4` | 16 B | Size locked by `static_assert` |
+| `fv_aabb2` | 16 B | Axis-aligned bounding box |
 
-## 标量 API
+## Scalar API
 
-每个向量类型各有 18 个函数（`fv_vec3` 额外多一个 `cross`）：
+Each vector type has 18 functions (`fv_vec3` has one extra, `cross`):
 
 `make` `add` `sub` `neg` `scale` `lerp` `min` `max` `clamp` `madd`
 `dot` `len_sqr` `len` `dist_sqr` `dist` `normalize` `project` `near`
 
-包围盒另有 `fv_aabb2_merge` 和 `fv_aabb2_overlaps`。
+The bounding box adds `fv_aabb2_merge` and `fv_aabb2_overlaps`.
 
-`min` / `max` / `clamp` 的 NaN 语义是 `(a < b) ? a : b`，不是 IEEE 的 `fminf`。这一点写进了头文件。
+`min`, `max` and `clamp` follow `(a < b) ? a : b` for NaN, not IEEE `fminf`. This is stated in the
+header.
 
-## 批量 API
+## Batch API
 
-共 33 个入口，按内存布局分五类。名字里的数字表示一个 256-bit 寄存器装几个元素：`fv_vec2` 装 4 个，叫 `_x4`；`fv_vec4` 装 2 个，叫 `_x2`。两者都能装满，没有 lane 浪费。
+33 entry points, grouped by memory layout. The number in a name is how many elements fit in one
+256-bit register: four `fv_vec2` (`_x4`) or two `fv_vec4` (`_x2`). Both fill the register
+completely, so no lane is wasted.
 
-### AoS 交错
+### AoS (array of structs)
 
-调用方数组原样传入，不需要改布局。
+Pass your existing arrays as they are.
 
-| 类型 | 函数 |
+| Type | Functions |
 |---|---|
 | `fv_vec2` | `add_x4` `sub_x4` `scale_x4` `lerp_x4` `madd_x4` |
 | `fv_vec4` | `add_x2` `sub_x2` `scale_x2` `lerp_x2` `madd_x2` |
 
-### SoA 分量数组
+### SoA (component arrays)
 
-把 x、y、z 分成独立数组。归约型运算只有这种布局才高效。
+Components live in separate arrays. Reductions are only efficient in this layout.
 
-| 类型 | 函数 |
+| Type | Functions |
 |---|---|
 | `fv_vec2` | `add_soa` `scale_soa` `dot_soa` `len_soa` `normalize_soa` |
 | `fv_vec3` | `add_soa` `scale_soa` `dot_soa` `len_soa` `normalize_soa` |
 | `fv_vec4` | `dot_soa` `len_soa` `normalize_soa` |
 
-三维只有 SoA 形态。`fv_vec3` 是 12 B，一个寄存器装两个会空出 8 B；要填满就得 shuffle 拆包再打包，省下的宽度又赔回去。
-给结构体加 padding 会破坏 ABI，也让它变大 33%。
-所以三维走「同一分量的 8 个元素装一条寄存器」，lane 利用率 100%。
+3D only has the SoA form. `fv_vec3` is 12 B, so packing two per register leaves 8 B unused; filling
+it requires shuffling apart and back together, which gives back the width you saved. Padding the
+struct would break the ABI and make it 33% larger. So 3D packs eight elements of the *same
+component* into one register, at 100% lane utilization.
 
-### 稀疏更新
+### Sparse updates
 
-| 函数 | 语义 |
+| Function | Semantics |
 |---|---|
-| `add_x4_mask` | 掩码非零的元素做加法，掩码为零的元素写回 `a[i]` 原值 |
-| `add_x4_mask_inplace` | 就地做加法。掩码为零的元素值不变；不保证没有被物理写回 |
-| `add_x4_idx` | 只处理 `idx` 指定的下标，可重复、可乱序 |
-| `scale_x4_idx` | 同上，做缩放 |
+| `add_x4_mask` | Add where the mask is non-zero; where it is zero, write back the original `a[i]` |
+| `add_x4_mask_inplace` | In-place add. Values of masked-out elements are unchanged; they are not guaranteed to be left physically untouched |
+| `add_x4_idx` | Process only the indices in `idx`; duplicates and out-of-order indices are allowed |
+| `scale_x4_idx` | Same, for scaling |
 
-`_idx` 是标量循环，没有用 `vgatherdps`。Zen 2 上 gather 由微码实现，约 10 周期一条，不划算。
+The `_idx` variants use a scalar loop rather than `vgatherdps`. On Zen 2, gather is microcoded at
+roughly 10 cycles per instruction, which does not pay off.
 
-### 流式写入
+### Streaming stores
 
-`add_x4_stream` `sub_x4_stream` `scale_x4_stream` `add_soa_stream` `scale_soa_stream` `normalize_soa_stream`
+`add_x4_stream` `sub_x4_stream` `scale_x4_stream` `add_soa_stream` `scale_soa_stream`
+`normalize_soa_stream`
 
-用非临时存储写出结果，绕过 cache，也省掉 RFO 那一次读。结果不马上被读、且工作集远大于 L3 时才划算。这个选择必须由调用方做，库不会自动切换。
+These write results with non-temporal stores, bypassing the cache and skipping the read-for-
+ownership traffic. They pay off only when the result is not read back soon and the working set is
+far larger than L3. The library will never switch to them on its own; the choice belongs to the
+caller.
 
-## 语义承诺
+## Guarantees
 
-### 逐位一致
+### Bit-for-bit identical
 
-下面这些入口保证与对应标量 API 的浮点位模式完全相同，可以直接 `memcmp`：
+The following entry points are guaranteed to match the corresponding scalar API bit for bit, so
+`memcmp` is a valid test:
 
-- `add` / `sub` / `scale` / `lerp` / `madd` 的 `_x4`、`_x2`、`_soa`、`_mask`、`_idx` 变体
+- the `_x4`, `_x2`, `_soa`, `_mask` and `_idx` variants of `add`, `sub`, `scale`, `lerp` and `madd`
 - `len_soa`
 - `normalize_soa`
-- `_stream` 系列与对应非 stream 版本
+- every `_stream` function against its non-stream counterpart
 
-实现上只用 `vaddps`、`vsubps`、`vmulps`、`vdivps`、`vsqrtps`，不用 FMA，不用倒数近似，归约顺序与标量一致。
+The implementation uses only `vaddps`, `vsubps`, `vmulps`, `vdivps` and `vsqrtps`. No FMA, no
+reciprocal approximations, and reduction order matches the scalar path.
 
-### 唯一的例外：`dot_soa`
+### The one exception: `dot_soa`
 
-`dot_soa` 用 4 个累加器再归约一次，结果依赖归约顺序，不保证逐位一致。n < 8 时它退化成顺序累加，这时与标量路径一致。需要逐位复现请用标量 `dot`。
+`dot_soa` uses four accumulators and reduces once at the end, so its result depends on reduction
+order and is not bit-for-bit identical. Below eight elements it degenerates to sequential
+accumulation and does match. Use the scalar `dot` when you need exact reproducibility.
 
-头文件里两组误差数字要分开读：
+The header states two error figures that must not be confused:
 
-| 说法 | 含义 |
+| Statement | Meaning |
 |---|---|
-| n ≤ 1000 相对误差 ≤ 4e-8 | 与**标量路径**的差 |
-| 整段 vs 切段 2.4e-5 | 与**另一种切分**的差 |
+| relative error ≤ 4e-8 for n ≤ 1000 | difference from the **scalar path** |
+| 2.4e-5 between whole and split | difference from a **different split** |
 
-前者不能当作后者的上界。
+The first is not an upper bound for the second.
 
-### 分段不变性
+### Split invariance
 
-逐元素型入口（所有 `add` / `sub` / `scale` / `lerp` / `madd` / `len` / `normalize` 的批量变体）具备这个性质：同一数组切成任意多段分别调用，输出与一次调用逐位相同。
+Element-wise entry points (every batch variant of `add`, `sub`, `scale`, `lerp`, `madd`, `len` and
+`normalize`) are split invariant: calling them on any number of segments of the same array produces
+output bit-identical to a single call.
 
-归约型入口不具备。`dot_soa` 的归约树随切分改变，实测 n=8192 时「整段」与「切两段再相加」相对差 2.4e-5，12 组语料全部不一致。同一实验里 `add_x4` 作为对照 12 组全部逐位一致。
+Reductions are not. `dot_soa`'s reduction tree changes with the split; measured on n = 8192, "one
+call" versus "two segments summed" differ by 2.4e-5 in relative terms, and all 12 corpora disagreed.
+In the same experiment `add_x4` agreed bit for bit on all 12.
 
-这是归约的设计必然，不是缺陷。分块并行时如果需要结果与切分无关，请用标量 `dot` 顺序累加，或自己固定切分方式。
+This is inherent to reduction, not a defect. If you need results independent of the split,
+accumulate sequentially with the scalar `dot`, or fix the split yourself.
 
-### 尾长与指针
+### Lengths and pointers
 
-长度 `n` 任意，包括 0 和 `NULL`。主循环处理整块，剩下的走标量尾巴。
+`n` is arbitrary, including 0 and `NULL`. The main loop handles full blocks and a scalar tail
+handles the rest.
 
-`_x4` 与 `_soa` 的指针需满足 `__restrict` 前提，输入输出不得重叠。
+`_x4` and `_soa` require the `__restrict` precondition: inputs and outputs must not overlap.
 
-## 性能
+## Performance
 
-测试机：AMD Ryzen 7 5700U，8 核 16 线程，AVX2 + FMA，无 AVX-512。
+Test machine: AMD Ryzen 7 5700U, 8 cores / 16 threads, AVX2 + FMA, no AVX-512.
 
-### 缓存边界
+### Cache boundaries
 
-L3 是 **4 MiB per CCX**，两个 CCX 合计 8 MiB。单线程只能用到自己那 4 MiB。
-这一点可以从 `/sys/devices/system/cpu/cpu0/cache/index3` 读到：`size=4096K`, `shared_cpu_list=0-7`。
+L3 is **4 MiB per CCX**, 8 MiB across both CCXs. A single thread only reaches its own 4 MiB. This is
+visible in `/sys/devices/system/cpu/cpu0/cache/index3`: `size=4096K`, `shared_cpu_list=0-7`.
 
-按 `add` 的 24 B/元素算，拐点在 4 MiB ÷ 24 B ≈ **1.75×10⁵ 个活跃元素**。实测吻合：2^17（工作集 3 MB）是 38–57 GB/s，2^18（6 MB）掉到 5.6–8.8 GB/s。
+At 24 B per element for `add`, the knee is at 4 MiB ÷ 24 B ≈ **1.75e5 live elements**. Measurements
+agree: 2^17 (3 MB working set) runs at 38–57 GB/s, while 2^18 (6 MB) drops to 5.6–8.8 GB/s.
 
-### 相对标量调用的加速比
+### Speedup over scalar calls
 
-基线是**逐元素调用库里的标量函数**，那是跨 TU 调用、无法内联的写法。如果换成手写 C 循环并在同一编译单元内编译，GCC 会自动向量化，差距会小得多（`dot` 只剩 4 倍左右）。
+The baseline is **calling the library's scalar function per element**, which is a cross-TU call that
+cannot be inlined. Writing the loop yourself in the same translation unit lets GCC auto-vectorize
+it, and the gap shrinks a lot (`dot` comes down to roughly 4x).
 
-N = 8192，每数组 32 KB，L2 驻留：
+N = 8192, 32 KB per array, L2 resident:
 
-| 运算 | `_x4` | `_soa` |
+| Operation | `_x4` | `_soa` |
 |---|---|---|
 | add | ~2.1x | ~1.9x |
 | scale | ~2.6x | ~2.7x |
@@ -152,99 +178,148 @@ N = 8192，每数组 32 KB，L2 驻留：
 | dot | — | ~20x |
 | len | — | ~2.7x |
 | normalize | — | ~3.4x |
-| 碰撞微内核 | — | ~5.1x |
-| add_mask（5% / 50% / 95%） | ~1.7x / ~3.8x / ~3.3x | — |
-| add_idx（5% / 50%） | ~1.1x / ~1.4x | — |
+| collision microkernel | — | ~5.1x |
+| add_mask (5% / 50% / 95%) | ~1.7x / ~3.8x / ~3.3x | — |
+| add_idx (5% / 50%) | ~1.1x / ~1.4x | — |
 
-### `_stream` 的实测
+### Measurements for `_stream`
 
-数据来自 `bench/ab` 的同进程交错 A/B，带同轮 A/A 地板，AB/BA 换序 × 两套独立构建。比值只在同一次运行内可比。
+Data comes from `bench/ab`: same-process interleaved A/B with a same-round A/A floor, AB/BA order
+swaps and two independent builds. Ratios are only comparable within one run.
 
-| 场景 | 结果 |
+| Scenario | Result |
 |---|---|
-| 24 MiB 工作集（n=1M） | add 1.350 / sub 1.293 / scale 1.313 |
-| 192 MiB 工作集（n=8M） | add 1.422 / sub 1.519 / add_soa 1.582 |
-| 96 MiB（n=4M） | 全部无法判定，该档 A/A 地板 1.34–1.61 |
-| 3 MiB（L3 边界） | 全部无法判定，该档 A/A 比值 0.50–2.22 |
-| L2 内（n=8192） | add 0.217 / sub 0.301 / scale 0.130 / add_soa 0.229 / scale_soa 0.138 / normalize_soa 0.506 |
+| 24 MiB working set (n=1M) | add 1.350 / sub 1.293 / scale 1.313 |
+| 192 MiB working set (n=8M) | add 1.422 / sub 1.519 / add_soa 1.582 |
+| 96 MiB (n=4M) | inconclusive for all; that tier's A/A floor is 1.34–1.61 |
+| 3 MiB (L3 boundary) | inconclusive for all; that tier's A/A ratios span 0.50–2.22 |
+| Inside L2 (n=8192) | add 0.217 / sub 0.301 / scale 0.130 / add_soa 0.229 / scale_soa 0.138 / normalize_soa 0.506 |
 
-最后一行是反例：数据本来就在 cache 里，非临时存储只会多付清行的代价。六个入口在这一档全部被判为变慢，区间 0.13–0.51x。
+The last row is the counter-example. The data is already cached, so non-temporal stores only pay the
+cost of flushing full lines. All six entry points are judged slower in that tier, spanning
+0.13–0.51x.
 
-关于上限：字节账给出的期望值，`add` 系是 32/24 = 1.333，`scale` 与 `normalize` 是 24/16 = 1.500。一个元素搬几个 float 只能逐入口算。
-实测值分布较散，单点超过上限 20% 以内都算噪声。
+On the ceiling: byte accounting gives expected values of 32/24 = 1.333 for the `add` family and
+24/16 = 1.500 for `scale` and `normalize`. How many floats an element moves can only be counted per
+entry point. Measured values scatter widely, so a single point exceeding the ceiling by up to 20%
+counts as noise.
 
-### `_mask_inplace` 的实测
+### Measurements for `_mask_inplace`
 
-5 种密度 × 4 档规模共 20 个点，全部无法判定，增益在 −0.10 到 +0.00 之间。
+Five densities by four sizes, 20 points in total. All are inconclusive, with gains between −0.10 and
++0.00.
 
-原因在流量账上。就地写之前目标数组已经被读过，对应的 cache line 本来就在 cache 里，普通 store 这时不产生 RFO。所以「就地」省掉的是 0 B，不是 8 B/元素。它的价值是形态：省掉一块输出缓冲，不是速度。
+The reason is in the traffic accounting. An in-place write touches a target array that has already
+been read, so the cache line is already resident and an ordinary store triggers no read-for-
+ownership in that situation. In-place saves 0 B per element, not 8. Its value is shape: it removes
+an output buffer, not time.
 
-### 读这些数字时要注意
+### Reading these numbers
 
-- 加速比必须连同工作集大小一起报。N = 1<<20（24 MB）时三档全部收敛到 1.0–1.5x，因为都受限于本机 6–7 GB/s 的流带宽。
-- 收益主要来自消除跨 TU 调用边界，不是 intrinsics。同一份数学放进头文件内联后，`-O3 -march=native` 的自动向量化几乎追平手写 AVX2。
-- 这台机器长期有外部负载，同一份代码跨运行可差 20–25%。不同夹具的绝对值不要直接比，只看同一次运行内的比值。
-- 三维与四维批量相对标量的加速比尚未测量，不要引用成数字。本轮只测了它们的形态差：65 个点里 5 通过、8 变慢、52 无法判定，读数散布在 0.97–1.93 之间。
+- Always report the working set alongside a speedup. At N = 1<<20 (24 MB) all three implementations
+  converge to 1.0–1.5x, limited by this machine's 6–7 GB/s streaming bandwidth.
+- Most of the gain comes from removing cross-TU call boundaries, not from intrinsics. Once the same
+  math is inlined from the header, `-O3 -march=native` auto-vectorization nearly matches hand-
+  written AVX2.
+- This machine carries persistent external load, so the same code can vary 20–25% between runs.
+  Never compare absolute values across fixtures; only ratios within one run are meaningful.
+- The absolute speedup of the 3D and 4D batch entries over scalar is not measured. Do not quote it.
+  This round measured only their shape difference: of 65 points, 5 passed, 8 were slower and 52
+  were inconclusive, with readings scattered between 0.97 and 1.93.
 
-判定标准见 `docs/acceptance-protocol.md`。原始判定表在 `docs/research/raw/ab_campaign_verdict.txt`，每次 `make run` 会覆盖，引用时请连同时刻。
+The acceptance criteria are in `docs/acceptance-protocol.md`. The raw verdict table is
+`docs/research/raw/ab_campaign_verdict.txt`, which every `make run` overwrites, so quote it together
+with its timestamp.
 
-## 构建与测试
+## Building and testing
 
 ```bash
 make                         # build/libflashvec.a
-make test-all                # 30 + 57 + 1098 条断言 + 两个 C 兼容性测试
+make test-all                # 30 + 57 + 1098 assertions + two C compatibility tests
 
-make test-header             # 严格编译档 + 双重包含
-make test-inline             # 默认形态 vs FV_USE_EXTERN 形态逐字节对拍
-make test-fma                # 消费者带 -march=native -mfma 时仍须位级一致
-make test-inline-effects     # 内联效果普查
-make test-stream             # _stream 与 _mask_inplace 的行为回归
-make test-vec4               # 四维标量与批量
-make test-vec34-inline       # 三维/四维批量形态对拍
-make test-refactor           # 以上全部 + 导出符号清单 + 反汇编普查
+make test-header             # strict compile settings + double inclusion
+make test-inline             # default form vs FV_USE_EXTERN form, byte for byte
+make test-fma                # still bit-identical for a -march=native -mfma consumer
+make test-inline-effects     # survey of what inlines and what does not
+make test-stream             # regression for _stream and _mask_inplace
+make test-vec4               # 4D scalar and batch
+make test-vec34-inline       # 3D/4D batch shape comparison
+make test-refactor           # all of the above plus symbol list and disassembly survey
 ```
 
-### 编译选项
+### Compiler flags
 
-默认是 `-O3 -fno-math-errno -ffp-contract=off`。
+The default is `-O3 -fno-math-errno -ffp-contract=off`.
 
-`-fno-math-errno` 放弃「数学函数失败时设置 errno」。本库 `sqrt` 的参数恒非负，errno 不会被设置；加上它之后含 `sqrtf` 的循环才能向量化，数值逐位不变。
+`-fno-math-errno` drops the guarantee that math functions set `errno` on failure. Here `sqrt` never
+sees a negative argument, so `errno` is never set anyway; adding the flag is what lets loops
+containing `sqrtf` vectorize, with no change to a single bit.
 
-`-ffp-contract=off` 禁止把 `a + b*c` 收缩成 FMA。FMA 收缩会让同一表达式在不同编译单元或不同目标下差 1 ulp。
-头文件里另有 `#pragma GCC optimize("fp-contract=off")` 作为第二道保险。
+`-ffp-contract=off` forbids contracting `a + b*c` into an FMA. Contraction would make the same
+expression differ by 1 ulp across translation units or targets. The header adds `#pragma GCC
+optimize("fp-contract=off")` as a second line of defence.
 
-不使用 `-march=native`、`-mavx2`、`-ffast-math`。默认产物保持 x86-64 基线。
-AVX2 只在头文件里用函数级 `target("avx2")` 属性加运行时 `__builtin_cpu_supports` 派发启用。
-非 AVX2 机器与所有尾长都走标量路径，结果相同。
+`-march=native`, `-mavx2` and `-ffast-math` are not used. The default build stays on the x86-64
+baseline. AVX2 is enabled only inside the header, through function-level `target("avx2")` attributes
+plus runtime dispatch on `__builtin_cpu_supports`. Machines without AVX2, and every tail, take the
+scalar path with identical results.
 
-## 设计取舍
+## Design notes
 
-### 用 C++ 编译器写 C
+### C written with a C++ compiler
 
-头文件是纯 C 接口，带 `extern "C"` 保护。实现用 C++ 编译器编译，但只使用 C 语言子集。这样将来想引入 C++ 特性时，不用换编译器，也不用改对外 ABI。
+The header is a pure C interface with `extern "C"` guards. The implementation is compiled as C++ but
+only uses the C language subset. Introducing C++ features later requires neither a toolchain change
+nor an ABI change.
 
-### 批量入口放在头文件里
+### Batch entry points live in the header
 
-跨 TU 调用边界是实测的一阶瓶颈，而链接静态库的调用方无法消除它。
-所以实现只写一份，放在头文件里；`src/flashvec_batch.cpp` 保留同名 `extern` 符号，供 `FV_USE_EXTERN` 形态和已经编译好的旧调用方使用。
+The cross-TU call boundary is a measured first-order bottleneck, and a caller linking a static
+library cannot remove it. So the implementation is written once, in the header, while
+`src/flashvec_batch.cpp` keeps same-named `extern` symbols for the `FV_USE_EXTERN` form and for
+already-compiled callers.
 
-代价是头文件会在支持的目标上条件包含 `<immintrin.h>`。用纯 C 编译器或者定义 `FV_USE_EXTERN` 时，它仍然只是一个纯声明头文件。
+The cost is that the header conditionally includes `<immintrin.h>` on supported targets. With a pure
+C compiler, or with `FV_USE_EXTERN` defined, it remains a declaration-only header.
 
-### 头文件里的 pragma 会挡住内联
+### The pragma in the header blocks inlining
 
-`target("avx2")` 管不住调用方命令行带来的 `-mfma`。实测在 `-march=native -mfma -ffp-contract=fast` 下，带 target 属性的内核照样会出现 `vfmadd`。
-所以有收缩风险的入口必须用 pragma 罩住，而 GCC 不会把带不同优化选项的函数内联进调用方。
+`target("avx2")` cannot stop the `-mfma` a caller brings on the command line. Measured under
+`-march=native -mfma -ffp-contract=fast`, kernels carrying the target attribute still emit `vfmadd`.
+Entry points at risk of contraction therefore have to be wrapped in the pragma, and GCC will not
+inline a function with different optimization options into its caller.
 
-结果是这部分入口（`lerp`、`madd`、`dot`、`len`、`normalize`）在消费者的默认选项下每批多一次 TU 内调用，其余八个入口可以完整内联。
-`make test-inline-effects` 把这个契约钉成了可复现的断言。
+The consequence is that these entry points (`lerp`, `madd`, `dot`, `len`, `normalize`) cost one
+extra translation-unit-local call per batch. The other eight inline completely. `make test-inline-
+effects` pins this contract down as a reproducible assertion.
 
-## 还没做
+## Not done yet
 
-- `_fast` 变体，例如 `rsqrtps` 加一次牛顿迭代的 normalize，约 2 ulp 误差，约快 10%。必须作为新函数提供，不能改默认语义。
-- 近似三角函数。`atan` 多项式约比 glibc 快 2.7 倍，但必须写明输入域。
-- 矩阵、四元数、角度与旋转。
-- 三维与四维批量的绝对加速比测量。
+- `_fast` variants, for example a `rsqrtps` normalize with one Newton iteration, about 2 ulp of
+  error and roughly 10% faster. These must be new functions and must not change existing
+  semantics.
+- Approximate trigonometry. An `atan` polynomial runs about 2.7x faster than glibc, but the input
+  domain has to be documented.
+- Matrices, quaternions, angles and rotations.
+- Absolute speedup measurements for the 3D and 4D batch entries.
 
-已经做完、旧版这里写「留给以后」的：三维批量入口（走 SoA）、四维向量（`fv_vec4` 加 `_x2` 与 `_soa` 批量）。见上面的 API 节。
+Already done, though an earlier version of this file listed them as future work: 3D batch entry
+points via SoA, and `fv_vec4` with `_x2` AoS and `_soa` reduction batches.
 
-更多分析见 `docs/optimization-report.md`。哪些方向已经实测否决，见 `docs/acceptance-protocol.md` 的 §9。
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [`docs/acceptance-protocol.md`](docs/acceptance-protocol.md) | The five acceptance criteria, the A/A floor, and six directions that measurements have already rejected |
+| [`docs/optimization-report.md`](docs/optimization-report.md) | Full optimization analysis with evidence |
+| [`docs/implementation-log.md`](docs/implementation-log.md) | What was landed, in what order, with the acceptance evidence for each step |
+| [`bench/ab/README.md`](bench/ab/README.md) | The same-process A/B harness: how it works and where it lies |
+| [`verify/README.md`](verify/README.md) | Independent verification and benchmarks |
+| [`docs/research/`](docs/research/README.md) | Research notes (Chinese, kept for provenance) |
+
+Chinese translations live beside each document under `zh-CN/`. They may lag the English
+originals; where they disagree, the English version is authoritative.
+
+## License
+
+Apache License 2.0. See [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).

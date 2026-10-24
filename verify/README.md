@@ -1,36 +1,64 @@
-# flashvec 批量 SIMD 改动 —— 独立验证与基准（验收者 F）
+# flashvec batch SIMD work — independent verification and benchmarks (verifier F)
 
-独立第三方验收：不读实现者的自述，全部数字由本目录的夹具现场跑出。
-**只拥有 verify/**，未修改 include/ src/ tests/ bench/ 根 Makefile docs/。
+> English | [简体中文](zh-CN/README.md)
 
-> **有效性边界（2026-10 重构后补记，请先读这段）**
-> 库在本文写作之后经历了三次大改：批量入口的实现搬进 `include/flashvec.h` 的 `static inline`、
-> 新增 `_stream` / `_mask_inplace` / `fv_vec4` / vec3·vec4 的 SoA 批量、以及 L3 尺寸的更正。
-> 因此：
-> * **§6 的结构检查已经按新架构重写**（`checks.sh`，11 条规则，逐条写明旧定义→新定义），
->   本文末尾「结构检查覆盖…」那一节是它的规则清单。
-> * **§1 的位级对拍、§2 的性能数字来自重构前的快照**（`build/parity_*`、`build/perf_*` 的时间戳
->   是 10-17 / 10-23，早于这次重构）。它们证明的是当时那份源码；要在当前工作树上重新取得证据，
->   必须重跑 `make parity` / `make perf`。**在那之前，这两个数字表不可当作当前代码的验收证据。**
-> * 机器口径也已更正：L3 是 **4 MiB/CCX × 2 CCX = 8 MiB 芯片总量，单线程可见 4 MiB**（见下），
->   本文 §2 里凡是按「8 MB L3」推的拐点都要按 4 MiB 重算。
+Independent third-party acceptance: the implementer's own account is not taken on trust, and every number
+here was produced on the spot by the fixtures in this directory. **verify/ is the only thing owned here**;
+include/ src/ tests/ bench/ the root Makefile and docs/ were not modified.
 
-* 机器：AMD Ryzen 7 5700U（8 核 16 线程，AVX2 + FMA，L2 512 KiB/核，L3 4 MiB/CCX x2）
-* 编译器：g++ (Ubuntu 12.4.0-2ubuntu1~24.04.1) 12.4.0，内核 6.17.0-19-generic
-* 被验证版本（重构前）：src/flashvec.cpp（P0）+ src/flashvec_batch.cpp（P1）+ include/flashvec.h。
-  重构后：实现的唯一一份在 `include/flashvec.h`（`static inline`），`src/flashvec_batch.cpp`
-  只剩 33 个 `extern` 转发符号，另新增 `src/flashvec_vec4.cpp`。
-* 本目录产物：parity.cpp（位级一致性）、perf.cpp（基准）、c_api_check.c（纯 C ABI）、checks.sh（结构检查）、
-  ref_strict.{h,cpp}（我自己的标量参考，单独 TU、-ffp-contract=off）、Makefile（独立构建）、build/*.txt（原始输出留档）
+> **Validity boundary (added after the 2026-10 refactor; please read this first)**
+> The library went through three major changes after this document was written: the batch entry-point
+> implementations moved into `include/flashvec.h` as `static inline`; `_stream` / `_mask_inplace` /
+> `fv_vec4` / SoA batch for vec3·vec4 were added; and the L3 size was corrected.
+> Therefore:
+> * **The structure checks in §4 have been rewritten for the new architecture** (`checks.sh`, 11 rules,
+>   each stating its old definition → new definition); the rule list is in the "Structure checks"
+>   subsection of §4.
+> * **The bit-level comparison in §1 and the performance numbers in §2 come from a pre-refactor
+>   snapshot** (the timestamps of `build/parity_*` and `build/perf_*` are 10-17 / 10-23, earlier than
+>   this refactor). They are evidence about that source tree. Re-establishing evidence on the current
+>   working tree requires re-running `make parity` / `make perf`.
+>   **Until then, those two number tables must not be used as acceptance evidence for the current code.**
+> * The machine accounting has also been corrected: L3 is **4 MiB/CCX × 2 CCX = 8 MiB chip total, with
+>   4 MiB visible to a single thread** (see below); every knee in §2 of this document that was derived
+>   from "8 MB L3" must be recomputed against 4 MiB.
+
+- Machine: AMD Ryzen 7 5700U, 8 cores / 16 threads, AVX2 + FMA, L2 512 KiB/core, L3 4 MiB/CCX x2.
+- Compiler: g++ (Ubuntu 12.4.0-2ubuntu1~24.04.1) 12.4.0, kernel 6.17.0-19-generic.
+- The version under verification is the pre-refactor one: src/flashvec.cpp (P0) + src/flashvec_batch.cpp
+  (P1) + include/flashvec.h.
+- After the refactor there is exactly one copy of the implementation, in `include/flashvec.h`, written as
+  `static inline`. `src/flashvec_batch.cpp` is left with 33 `extern` forwarding symbols, and
+  `src/flashvec_vec4.cpp` is new.
+
+Artifacts in this directory:
+
+| Artifact | Purpose |
+|---|---|
+| `parity.cpp` | bit-level consistency |
+| `perf.cpp` | benchmarks |
+| `c_api_check.c` | pure C ABI |
+| `checks.sh` | structure checks |
+| `ref_strict.{h,cpp}` | my own scalar reference, separate TU, `-ffp-contract=off` |
+| `Makefile` | standalone build |
+| `build/*.txt` | archived raw output |
 
 ---
 
-## 1. 位级一致性（parity）：全部 PASS
+## 1. Bit-level consistency (parity): all PASS
 
-比较方式：每个逐元素批量函数都与 **(a) 库自己的标量 API** 与 **(b) 我独立写的标量参考**逐元素比较 IEEE 位模式。
-覆盖 **全部尾长 n = 0..17**、多组随机/特殊语料（含 0、-0.0、次正规 1e-45、1e-30、FV_EPS 邻域
-9.9999994e-7 / 1e-6 / 1.0000001e-6、±1e30、±3.4e38、FLT_MIN）、mask 的四种模式、idx 的顺序/逆序/
-大量重复/随机乱序，并对每个函数的输出缓冲区做越界写 canary（o[n..) 不允许被写）。
+Method: every element-wise batch function is compared element by element on IEEE bit patterns, against
+two references: (a) the library's own scalar API and (b) a scalar reference I wrote independently.
+
+Coverage: **every tail length n = 0..17**, plus several random and special corpora. The special corpus
+contains 0, -0.0, the subnormals 1e-45 and 1e-30, the FV_EPS neighbourhood 9.9999994e-7 / 1e-6 /
+1.0000001e-6, ±1e30, ±3.4e38, FLT_MIN. mask is tested in four modes. idx is tested in ascending order,
+descending order, with many duplicates, and shuffled.
+
+Every function's output buffer carries an out-of-bounds write canary: o[n..) must not be written.
+
+*(The fixture's stdout is reproduced verbatim. Column words: 判定 = verdict, vs库标量 = vs library
+scalar, vs独立参考 = vs independent reference, 备注 = note.)*
 
     [逐元素批量路径 vs 标量路径 位级一致性]   （-O2 默认档与 -O3 -march=native 档结果相同）
       函数                     判定   samples  vs库标量 vs独立参考 备注
@@ -57,16 +85,29 @@
       fv_aabb2_overlaps 边界相触               INFO  角点相触=0（规格未定义，仅记录）
       min/max 的 ±0 行为                       INFO  min((-0,0),(0,-0))=(0x00000000,0x80000000)
 
-三档全绿、退出码 0：**-O2 无 -march=native**（默认构建档）、**-O3 -march=native**、**ASan+UBSan**（-O1）。
-原始输出：verify/build/parity_O2_plain.txt、parity_O3_native.txt、parity_asan.txt。
+All three configurations green, exit code 0. The three are **-O2 without -march=native** (the default
+build configuration), **-O3 -march=native**, and **ASan+UBSan** (-O1).
+Raw output: verify/build/parity_O2_plain.txt, parity_O3_native.txt, parity_asan.txt.
 
-**NaN 处理方式（比较策略，夹具里已自检）**：默认按 IEEE 位模式 memcmp；唯一例外是**两侧都是 NaN**
-（payload 可不同）判为相等并单独计数（上表 NaN对=2/8）。±0.0 的差异按位如实判为不一致并单独分类
-SIGNED_ZERO；本次没有出现。含 NaN/Inf 的输入单独统计（edge），未计入主判定 —— 本次 edge 分歧为 0。
-canary：**无任何越界写**；_idx 变体对未被 idx 引用的 o[i] 也**没有改写**（UNTOUCHED=0，与头文件 line 167 一致）。
-ASan+UBSan 无报错（我先修掉了自己夹具里的 new Stat() 泄漏，之后 exit=0）。
+**How NaN is handled.** This is a comparison policy, and the fixture self-tests it. By default the
+comparison is an IEEE bit-pattern memcmp. The single exception: when **both sides are NaN** the two are
+judged equal and tallied separately, payloads may differ — hence the NaN-pair counts of 2/8 in the table
+above. A ±0.0 difference is reported bit-faithfully as a mismatch and classified separately as SIGNED_ZERO;
+none occurred this time.
 
-**dot_soa（规格允许重排归约顺序 -> 不做位级判定，只统计误差）**
+Inputs containing NaN/Inf are tallied separately as edge and excluded from the main verdict; edge
+disagreements were 0 this time.
+
+The canary verdict is **no out-of-bounds write at all**. The _idx variants also **do not rewrite** o[i]
+entries that idx does not reference: UNTOUCHED=0, consistent with header line 167. ASan+UBSan report
+nothing.
+I first fixed a new Stat() leak in my own fixture, and after that exit=0.
+
+**dot_soa is scored on error only, with no bit-level verdict**, because the specification allows it to
+reorder the reduction.
+
+*(Verbatim fixture output: 逐位相等 = bit-equal, 语料 = corpus, 头文件断言 = header assertion, 纯顺序累加 =
+plain sequential accumulation, 逐 n 逐位相等次数 = bit-equal count per n, 各 = each.)*
 
     fv_vec2_dot_soa            PASS*    144 cases   逐位相等 143/144
                               max|abs err| = 4.77e-07，max rel err = 6.22e-08（语料含 1e30 量级）
@@ -75,16 +116,24 @@ ASan+UBSan 无报错（我先修掉了自己夹具里的 new Stat() 泄漏，之
 
 ---
 
-## 2. 基准（perf）：ns/元素、加速比、校验和
+## 2. Benchmarks (perf): ns/element, speedup, checksum
 
-计时：clock_gettime(CLOCK_MONOTONIC)，每项 5 次取样取中位数，取样前先 warm-up 并校准内层重复次数
-（目标约 6 ms/取样）。**校验和 = 单次调用的输出累加**（与内层重复次数无关）；同一次运行内，除 dot_soa
-（后者报相对误差）外，各档校验和必须位级相等，否则该轮判无效 —— 本次全部位级相等。
+Timing uses clock_gettime(CLOCK_MONOTONIC), median of 5 samples per item. Before sampling, a warm-up run
+calibrates the inner repetition count, targeting about 6 ms per sample.
 
-口径提醒：这台笔记本变频（本次起始平均 **3125.2 MHz**）且与实现者的构建/基准并行争用 CPU，
-**跨夹具的绝对值不可比**（实现者测到 add_x4 = 0.346 ns/元素，我测到 1.240）。可比的是同一次运行内的比值。
+**The checksum is the sum of the outputs of one call**, independent of the inner repetition count. Within
+one run, apart from dot_soa which reports a relative error, every variant's checksum must be bit-identical
+or that round is void. This time all were bit-identical.
 
-原始输出：verify/build/perf_O3_native.txt（修订后夹具，-O3 -march=native）—— 逐行照抄：
+Accounting caveat: this laptop scales its frequency, and the starting mean this time was **3125.2 MHz**; it
+was also contending for the CPU with the implementer's builds/benchmarks.
+So **absolute values are not comparable across fixtures**: the implementer measured add_x4 = 0.346
+ns/element, I measured 1.240. What is comparable is a ratio within one run.
+
+Raw output: verify/build/perf_O3_native.txt (revised fixture, -O3 -march=native). Copied line for line:
+
+*(The columns are ASCII apart from these: 起始平均 CPU 频率 = starting mean CPU frequency, 校验和 = checksum,
+无此入口 = no such entry point, 触到我设的容差线 = hit the tolerance line I set.)*
 
     起始平均 CPU 频率: 3125.2 MHz
 
@@ -146,33 +195,51 @@ ASan+UBSan 无报错（我先修掉了自己夹具里的 new Stat() 泄漏，之
       lerp         soa(无此入口)          -          -                  -
       dot          scalar_api          5.268      1.00x          3677.5696    16.46
 
-**N=1<<20 这一档的表在这里被截断**：这一档的后半段（dot/soa 之后的 len、normalize、collision、稀疏）
-没有取得可信数据 —— 原因是我发现一个**早先版本基准进程**在 26 分钟后仍未结束、占着一整颗核（已 kill），
-它同时污染了这一档的数字；我按调度者要求停止重测，**不补估**缺行。N=8192 一档完整、可用。
+**The N=1<<20 table is truncated here.** The second half of that configuration produced no trustworthy
+data: the len, normalize, collision and sparse results after dot/soa.
 
-读数要点：
-* 撞带宽墙（N=1<<20）后 add/scale/lerp 全部回落到约 0.9-1.5x，与「三档在带宽墙前收敛」的预期一致。
-* soa 档在 dot 上 20.33x、normalize 3.35x、len 2.65x —— 归约型/带分支的运算是 SoA 的主场。
-* _mask 档在 50% 稀疏度 3.80x；_idx 档只有 1.08-1.35x（见风险点 2）。
+The reason: I found a benchmark process from an **earlier version** still running after 26 minutes,
+holding a whole core; it has since been killed. It also contaminated this configuration's numbers. At the
+dispatcher's request I stopped re-measuring and **do not estimate** the missing rows. The N=8192
+configuration is complete and usable.
 
----
+How to read this:
 
-## 3. 结论：收益主要来自「跨 TU 调用边界消失」，不是 intrinsics
-
-* add @N=8192：scalar_api 2.601 -> scalar_flat（同 TU 内联、-O3 自动向量化）**1.207** -> x4 **1.240**。
-  内联标量循环与库的 AVX2 打包路径**齐平**（2.15x vs 2.10x），intrinsics 本身没有额外优势。
-* 真正的差距在 scalar_api -> scalar_flat 这一段：2.15x 几乎全部是「每元素一次跨 TU 调用」的代价。
-  头文件 line 128 声称边界成本约 4.2 cycle/元素、是打包收益的 3 倍 —— 我的独立测量支持这个判断
-  （8.13 -> 3.77 cycle/元素）。
-* **限定条件**：scalar_flat 只是「调用方自己拥有这段循环、且与本 TU 一起被 -O3 -march=native 编译」时的上限。
-  **链接预编译静态库的调用方做不到**（GCC 拒绝跨 TU 向量化：missed: statement clobbers memory），
-  他们只能拿到 scalar_api 的 2.601；对他们而言 x4 的 2.10x 是实打实的。这正是批量入口存在的理由。
-* 批量入口另有内联标量循环也拿不到的收益：normalize 3.35x（标量带 per-element 分支，GCC 只做到 1.13x）、
-  dot 20.33x（4 累加器 + 末端归约，标量只能 3.02x）、collision 微内核 5.08x（标量 1.36x）。
+- Past the bandwidth ceiling (N=1<<20), add/scale/lerp all fall back to about 0.9-1.5x. That matches the
+  expectation that the variants converge before the bandwidth ceiling.
+- soa reaches 20.33x on dot, 3.35x on normalize and 2.65x on len. Reduction-type and branch-carrying
+  operations are where SoA wins.
+- _mask reaches 3.80x at 50% density; _idx gets only 1.08-1.35x, see risk 2.
 
 ---
 
-## 4. 复现命令
+## 3. Conclusion: the gain comes mainly from the cross-TU call boundary disappearing, not from intrinsics
+
+- The add @N=8192 row reads: scalar_api 2.601 -> scalar_flat **1.207** -> x4 **1.240**. scalar_flat is the
+  same-TU inlined form that -O3 auto-vectorizes.
+
+  The inlined scalar loop is **level** with the library's AVX2 packed path, 2.15x against 2.10x;
+  intrinsics on their own give no extra advantage.
+- The real gap is the scalar_api -> scalar_flat step. Almost all of the 2.15x is the cost of one cross-TU
+  call per element. Header line 128 claims the boundary costs about 4.2 cycles/element, 3 times the
+  packing gain; my independent measurement supports that: cycles/element drops from 8.13 to 3.77.
+- **Qualification**: scalar_flat is only an upper bound for a caller that owns the loop and compiles it
+  together with this TU under -O3 -march=native. **A caller linking a prebuilt static library cannot do
+  that**; GCC refuses to vectorize across TUs: missed: statement clobbers memory. They get only
+  scalar_api's 2.601.
+
+  For them x4's 2.10x is real, and that is exactly why the batch entry points exist.
+- The batch entry points also gain what even an inlined scalar loop cannot reach. normalize 3.35x, where
+  the scalar form carries a per-element branch and GCC reaches only 1.13x. dot 20.33x, from 4 accumulators
+  plus a final reduction, where scalar reaches only 3.02x. The collision microkernel 5.08x, scalar 1.36x.
+
+---
+
+## 4. Reproduction commands
+
+*(Commands and comments are reproduced verbatim: 位级一致性 = bit-level consistency, 基准 = benchmarks,
+三档 = three configurations, 单跑某一份 = run one of them on its own, 我重新编译 = recompiled by me,
+我只编译运行，不修改 = I only compile and run it, without modification.)*
 
     cd /home/hjl/桌面/codes/QWCIF/flashvec/verify
 
@@ -187,77 +254,202 @@ ASan+UBSan 无报错（我先修掉了自己夹具里的 new Stat() 泄漏，之
     ./build/parity_O3_native          # 或 parity_O2_plain / parity_asan
     taskset -c 2 stdbuf -o0 ./build/perf_O3_native
 
-关键原始输出（都在 verify/build/）：parity_O2_plain.txt、parity_O3_native.txt、parity_asan.txt、
-perf_O3_native.txt、c_api_check.txt、test_flashvec_F.txt、test_c_api_F.txt、checks.txt。
+The key raw outputs are all in verify/build/: parity_O2_plain.txt, parity_O3_native.txt, parity_asan.txt,
+perf_O3_native.txt, c_api_check.txt, test_flashvec_F.txt, test_c_api_F.txt, checks.txt.
 
-### 结构检查（checks.sh，只读仓库文件）：11 条规则，逐条都有 PASS/FAIL，任何一条 FAIL → 退出码非 0
+### Structure checks (checks.sh, reads repository files only)
 
-重构后重写过。每条规则在脚本里都写着「旧定义 → 新定义 + 为什么必须改」。要点：
+11 rules, each with its own PASS/FAIL; any FAIL → exit code other than 0. This section was rewritten after
+refactor. Every rule in the script states "old definition → new definition + why it had to change".
+Run it as `bash verify/checks.sh`; it also writes `build/checks.txt`, and exit code 0 means all PASS.
 
-| # | 现在检查什么 | 相对旧规则变了什么 |
+| # | Rule | How the criterion changed |
 |---|---|---|
-| 1 | 纯 C（`cc -std=c11 -pedantic-errors`）可编译；`immintrin` 展开行数 **> 0**（正对照）；头文件无 C++ 语法 | **判据反转**：旧规则要求头文件里 `immintrin` 行数为 0，重构后实现就在头文件里，为 0 反而说明封装坏了 |
-| 2 | `FV_USE_EXTERN` 形态的**包含集**里没有 `math.h` / `string.h` / `immintrin.h` / `stdlib.h`，且可被纯 C `-pedantic-errors` 编译 | **判据换形式**：旧规则是「头文件不得含 target 属性/builtin（应为纯声明）」，现在把等价事实变成可判定的包含集比较 |
-| 3 | `make -C .. -n -B all` 打出的每条 `-c src/…` 命令都不含 `-march=native/-mavx/-ffast-math/-mfma`；`FMA_FLAGS` 只被 `*_cpp_fma.o` 引用 | **判据落到实际命令**：旧规则 grep 全文件，会把「敌意选项对拍夹具」判死；现在直接问 make 默认目标执行什么（更严） |
-| 4 | `__builtin_cpu_supports` 与 `target(` 扫**头文件**；32 处派发全部写成 `!= 0`；并报告 `src/*.cpp` 里为 0 | **扫描目标迁移**：旧规则扫 `src/*.cpp`，重构后那里一处都没有 |
-| 5 | `include/` + `src/` 里 FMA / rcpps / rsqrtps / **maskload / maskstore（VMASKMOVPS）** 内建名 = 0；注释里提到助记符不算 | **范围扩到实现真正所在处**，并新增 VMASKMOVPS 禁用项 |
-| 6 | 头文件写明归约顺序免责 + 掩码语义（原样保留，新增 PASS 判据） | 不变 |
-| 7 | 机器/编译器事实（INFO，不设判据）；额外打印 `index2/index3` 的 `size` 与 `shared_cpu_list` | 新增缓存层级实测，防止文档与机器再次漂移 |
-| 8 | **产物级指令普查**：脚本自己按 `-O3 -march=native -mfma -ffp-contract=fast` 编 4 个对象（3 个库 TU + 纯 C 的 `test_stream.c`），`vfmadd/vfmsub/vfnmadd/vrcpps/vrsqrtps/haddps/vmaskmovps` **合计必须为 0**，`vmovntps` **必须 > 0** | **对象不再用 build/ 里的过期产物**；配置从 `-O3 -march=native` 升级到最狠的一档（并加 `-mfma`），禁用项从 6 项扩到 7 项，新增 NT store 正对照 |
-| 9 | 不带 `-march=native` 的默认档里：`fv_i_*_avx2` 局部符号存在、有 AVX2 指令、对象引用 `__cpu_model` 且在 `0x400`（avx2 位）上判断 | **判据改成消费者视角**：内核是头文件 static inline，所以「内核还在」对每个消费 TU 都成立；派发证据从「call 关系」换成「`__cpu_model` + avx2 位」 |
-| 10 | 默认档实测摘要（只引已有产物；本脚本**不做性能测量**），并识别 26 字节的已知垃圾文件 | 不变（新增垃圾文件识别） |
-| 11 | **新增**：`fv_i_maskload_add4_avx2` / `fv_i_maskstore_add4_avx2` 在整仓出现次数必须为 0 | 全新规则：这两个名字绑定被实测否决的 VMASKMOVPS 稀疏策略，不许复活 |
+| 1 | Compiles as pure C, `immintrin` line count > 0 | criterion inverted |
+| 2 | `FV_USE_EXTERN` include set is clean | criterion restated in a different form |
+| 3 | The commands emitted for the default target carry no acceleration flags | moved onto the actual commands |
+| 4 | Dispatch spelling scanned in the header | scan target migrated |
+| 5 | Forbidden builtin names are 0 where the implementation lives | scope widened |
+| 6 | The contract text is still in the header | unchanged |
+| 7 | Machine and compiler facts | cache measurement added |
+| 8 | Artifact-level instruction survey | object source changed, forbidden list extended |
+| 9 | Kernels and dispatch both present in the default configuration | criterion moved to the consumer's view |
+| 10 | Measured summary for the default configuration | unchanged |
+| 11 | Two retired internal names must not come back | entirely new rule |
 
-运行：`bash verify/checks.sh`（同时写 `build/checks.txt`；退出码 0 = 全部 PASS）。
+Each rule in detail below.
+
+#### Rule 1: compiles as pure C, `immintrin` expansion line count above 0
+
+What it checks now: the header compiles as pure C (`cc -std=c11 -pedantic-errors`); the `immintrin`
+expansion line count is **> 0**, which is the positive control; the header contains no C++ syntax.
+
+What changed from the old rule: **the criterion is inverted**. The old rule required 0 `immintrin` lines in
+the header. After the refactor the implementation is in the header, so 0 would mean the encapsulation is
+broken.
+
+#### Rule 2: the `FV_USE_EXTERN` form's include set is clean
+
+What it checks now: the **include set** of the `FV_USE_EXTERN` form contains no `math.h` / `string.h` /
+`immintrin.h` / `stdlib.h`, and it compiles as pure C with `-pedantic-errors`.
+
+What changed from the old rule: **the criterion is restated in a different form**. The old rule was "the
+header must contain no target attribute or builtin; it must be pure declarations". The equivalent fact is
+now an include-set comparison that can be decided mechanically.
+
+#### Rule 3: the commands the default target emits carry no acceleration flags
+
+What it checks now: every `-c src/…` command printed by `make -C .. -n -B all` is free of
+`-march=native/-mavx/-ffast-math/-mfma`; `FMA_FLAGS` is referenced only by `*_cpp_fma.o`.
+
+What changed from the old rule: **the criterion moves onto the actual commands**. The old rule grepped the
+whole file and would fail the hostile-flag comparison fixture. Now it asks make what the default target
+actually executes, which is stricter.
+
+#### Rule 4: dispatch spelling is scanned in the header
+
+What it checks now: `__builtin_cpu_supports` and `target(` are scanned in the **header**; all 32 dispatch
+sites are written as `!= 0`; and it reports the count in `src/*.cpp` as 0.
+
+What changed from the old rule: **the scan target moved**. The old rule scanned `src/*.cpp`, where after
+the refactor there is not a single occurrence.
+
+#### Rule 5: forbidden builtin names are 0 where the implementation lives
+
+What it checks now: in `include/` and `src/`, the builtin names FMA / rcpps / rsqrtps / maskload /
+maskstore are 0, where maskload / maskstore are **VMASKMOVPS**. A mnemonic mentioned in a comment does not
+count.
+
+What changed from the old rule: **the scope widened to where the implementation actually lives**, and
+VMASKMOVPS joined the forbidden list.
+
+#### Rule 6: the contract text is still in the header
+
+What it checks now: the header states the reduction-order disclaimer plus the mask semantics; this is kept
+as it was, with a PASS criterion added.
+
+What changed from the old rule: nothing.
+
+#### Rule 7: machine and compiler facts
+
+What it checks now: machine and compiler facts are recorded as INFO with no criterion; it additionally
+prints `size` and `shared_cpu_list` for `index2/index3`.
+
+What changed from the old rule: a measured cache hierarchy was added, so that the document and the machine
+cannot drift apart again.
+
+#### Rule 8: artifact-level instruction survey
+
+What it checks now: the script compiles 4 objects itself under `-O3 -march=native -mfma -ffp-contract=fast`,
+namely 3 library TUs plus the pure C `test_stream.c`.
+
+`vfmadd/vfmsub/vfnmadd/vrcpps/vrsqrtps/haddps/vmaskmovps` **must total 0**, and `vmovntps` **must be > 0**.
+
+What changed from the old rule: **the objects no longer come from stale artifacts in build/**. The
+configuration was raised from `-O3 -march=native` to the strictest one and `-mfma` was added. The forbidden
+list went from 6 items to 7, and a positive control for NT stores was added.
+
+#### Rule 9: kernels and dispatch are both still present in the default configuration
+
+What it checks now: in the default configuration without `-march=native`, `fv_i_*_avx2` local symbols exist,
+AVX2 instructions are present, and the object references `__cpu_model` and tests against `0x400`, which is
+the avx2 bit.
+
+What changed from the old rule: **the criterion moved to the consumer's view**. The kernels are header
+`static inline`, so "the kernel is still there" holds for every consuming TU. The dispatch evidence changed
+from a call relationship to `__cpu_model` + the avx2 bit.
+
+#### Rule 10: measured summary for the default configuration
+
+What it checks now: a measured summary for the default configuration, quoting existing artifacts only —
+**this script performs no performance measurement** — and it recognizes the known 26-byte junk files.
+
+What changed from the old rule: unchanged, with junk-file recognition added.
+
+#### Rule 11: the two retired internal names must not come back
+
+What it checks now (**new**): `fv_i_maskload_add4_avx2` / `fv_i_maskstore_add4_avx2` must occur 0 times in
+the whole repository.
+
+What changed from the old rule: an entirely new rule. Those two names are bound to a VMASKMOVPS sparse
+strategy that measurement rejected; they must not come back.
 
 ---
 
-## 5. 我最担心的 3 个风险点
+## 5. The 3 risks I worry about most
 
-1. **非 AVX2 机器的回退路径我没能真正跑过。** 本机有 AVX2，我无法强制 __builtin_cpu_supports("avx2")==0，
-   所以整段标量回退逻辑只被「尾长 n%4」间接覆盖（0..17 全覆盖）。我能给的只是结构性证据（派发写法、
-   内核是文件内静态符号、默认档对象里内核存在）。若 E 的测试也没有真正覆盖回退分支，那么这条路径是
-   全库唯一没有运行时证据的路径 —— 建议用 qemu-x86_64 或 CI 上的非 AVX2 机器补一次。
-2. **_idx 变体实际上没有 AVX2 内核（等价于标量循环），收益只有 1.08-1.35x。** 指令普查里没有
-   fv_*_idx_avx2 符号，fv_vec2_add_x4_idx 只有 1 条 vaddps。头文件只写了「代价是随机访存」，
-   没有说它在 SIMD 意义上并不比调用方自己的标量 gather 循环快。把 broad-phase 建在 _idx 上的收益预期
-   要按约 1.1-1.35x 估，而不是按 _mask 的 1.7-3.8x 估；另外 _idx 语义（不写未引用位置）虽然我验证通过，
-   但它是「保留 o 旧值」的唯一入口，调用方极易与 _mask 的「写回 a[i]」混淆。
-3. **dot_soa 没有真正的误差上界，头文件里的数字是语料相关的。** 头文件 line 146 写「误差量级约 1e-6 相对」，
-   并引用 tests/test_batch.cpp 的「<= 4e-8」；而我用小 n（0..17）、含 1e30 量级与阈值附近的对抗语料实测到
-   **max rel err = 6.22e-08**，在 perf 的 ±2 随机语料上 checksum 层面看到 **rel = 2.83e-06**（超出 4e-8，
-   也触到我夹具的 1e-6 容差线）。相对误差在有抵消的语料上会被放大，所以「<=4e-8」不能当上界用 ——
-   建议 docs 给出「绝对误差 + 语料条件」而不是裸的相对误差，或明确写「与语料相关，实测 4e-8 ~ 3e-6」。
+1. **I could not actually exercise the fallback path for non-AVX2 machines.** This machine has AVX2, and I
+   cannot force `__builtin_cpu_supports("avx2")==0`.
+   So the whole scalar fallback is covered only indirectly, through tail lengths n%4 across the full 0..17
+   range. All I can offer is structural evidence: the dispatch spelling, the kernels being file-static
+   symbols, and the kernels' presence in the default-configuration object.
 
-（另有两个未定义的边界行为，只作记录、不判失败：fv_aabb2_overlaps 角点相触返回 0（exclusive）；
-min/max 是 (a<b)?a:b 而非 IEEE fminf，min((NaN,1),(0,0))=(0,0)，头文件已写明该契约。）
+   If E's tests do not really cover the fallback branch either, then this is the only path in the whole
+   library without runtime evidence. I suggest covering it once with qemu-x86_64 or a non-AVX2 machine in
+   CI.
+2. **The _idx variants effectively have no AVX2 kernel; they are equivalent to a scalar loop, with a gain
+   of only 1.08-1.35x.** The instruction survey contains no `fv_*_idx_avx2` symbol, and
+   `fv_vec2_add_x4_idx` has only 1 vaddps. The header only says "the cost is random access"; it does not
+   say that in SIMD terms it is no faster than the caller's own scalar gather loop.
+
+   So a broad-phase built on _idx should be sized at about 1.1-1.35x, not at _mask's 1.7-3.8x. The _idx
+   semantics — no write to unreferenced positions — did pass my verification. But it is the only entry
+   point that preserves o's old value, and callers can easily confuse it with _mask writing a[i] back.
+3. **dot_soa has no real error bound; the number in the header is corpus-dependent.** Header line 146 says
+   "relative error on the order of 1e-6" and cites `tests/test_batch.cpp` for "<= 4e-8".
+
+   With small n (0..17) and an adversarial corpus containing 1e30-scale values and values near the
+   threshold, I measured **max rel err = 6.22e-08**. On the ±2 random corpus in perf I see
+   **rel = 2.83e-06** at the checksum level, beyond 4e-8 and past my fixture's 1e-6 tolerance line.
+
+   Relative error is amplified on corpora with cancellation, so "<=4e-8" cannot be used as a bound. I
+   suggest the docs give "absolute error + corpus conditions" rather than a bare relative error, or state
+   plainly "corpus-dependent, measured 4e-8 ~ 3e-6".
+
+There are two more undefined boundary behaviors, recorded here without being scored as failures.
+`fv_aabb2_overlaps` returns 0 when corners touch, i.e. it is exclusive.
+min/max is `(a<b)?a:b` rather than IEEE `fminf`, so `min((NaN,1),(0,0))=(0,0)`; the header already states
+that contract.
 
 ---
 
-## 6. 有没有发现实现者 E 未提及的问题？
+## 6. Did I find problems the implementer E did not mention?
 
-**有 3 条**（都不是「实现写错了」，而是「头文件/回报里没有说清，或说了但我测出反例」）：
+**Yes, 3 of them.** None is "the implementation is wrong"; each is either "the header/report does not say
+it clearly" or "it says it, but my measurements found a counterexample".
 
-1. dot_soa 的误差数字：头文件/回报引用 4e-8，我的对抗语料实测 6.22e-08，perf 语料上 2.83e-06（见风险点 3）。
-2. _idx 变体**没有 AVX2 内核**，实测只有 1.08-1.35x（见风险点 2）。E 只提到随机访存代价。
-3. 不带 -march=native 的默认构建里 AVX2 内核**确实存在**、派发也确实是 != 0（我用 nm 找到 11 个
-   fv_*_avx2 静态符号并在 objdump 里统计了指令）—— 这条是**支持** E 的，但 E 的回报里没有给这个经验证据，
-   我和调度者一开始都误判成「默认档是纯标量」，值得记一笔。
+1. The dot_soa error number: the header/report cites 4e-8; my adversarial corpus measures 6.22e-08 and the
+   perf corpus 2.83e-06 — see risk 3.
+2. The _idx variants **have no AVX2 kernel** and measure only 1.08-1.35x — see risk 2. E mentions only the
+   random-access cost.
+3. In the default build without -march=native the AVX2 kernels **really are present**, and dispatch really
+   is != 0. I found 11 fv_*_avx2 static symbols with nm and counted the instructions in objdump. This
+   point **supports** E, but E's report gave no empirical evidence for it; both the dispatcher and I
+   initially misjudged the default configuration as pure scalar, which is worth recording.
 
-位级一致性、掩码语义、idx 不越界、P0 小工具、纯 C 头文件、既有 30 条断言、FMA/倒数近似的禁用 —— 这 7 项
-我独立复验**全部通过**，与 E 的回报一致。**没有任何一条位级不一致或内存语义问题被我测出来。**
+Bit-level consistency, mask semantics, idx not writing out of bounds, the P0 helpers, the pure C header,
+the existing 30 assertions, and the ban on FMA/reciprocal approximations: all 7 of these passed my
+independent re-verification, consistent with E's report.
+**I found not a single bit-level inconsistency or memory-semantics problem.**
 
 ---
 
-## 7. 已知夹具局限（如实列出）
+## 7. Known fixture limitations (listed honestly)
 
-* 绝对值受频率调节与并行负载影响大（本次起始平均 3125.2 MHz）；只有同一次运行内的比值可比。
-  跨夹具对比实现者的 0.346 ns/元素与我的 1.240 无意义。
-* N=1<<20 的后半段缺失（见第 2 节）；我不补估、不外推。
-* verify/build/perf_O2_plain.txt 与 perf_O3_plain.txt（各 26 字节，内容为 /bin/sh: 3: IN: not found）是 23:08
-  那次 Makefile 单字符变量转义 bug（$P 被 make 吃掉，只留 IN）留下的过期垃圾，**不是有效测量**；
-  这两个文件会在下一次 make perf 时被正常覆盖。（该 bug 与库本身无关。）
-* x4 覆盖 add/sub/scale/lerp/madd，soa 覆盖 add/scale/dot/len/normalize —— 冻结接口本身没有
-  dot_x4 / len_x4 / normalize_x4 / lerp_soa / sub_soa，因此这些格子是「无此入口」而不是我没测。
-* collision 微内核的 soa_hybrid 只有归一化阶段向量化：反射需要「逐元素点积 + 逐元素缩放」，
-  冻结接口给不出来（scale_soa 只接受单个标量 s），反射阶段只能标量循环。这条对 P2 的布局选型有用。
+- Absolute values are strongly affected by frequency scaling and parallel load; the starting mean this time
+  was 3125.2 MHz. Only ratios within one run are comparable. Comparing the implementer's 0.346 ns/element
+  with my 1.240 across fixtures is meaningless.
+- The second half of N=1<<20 is missing, see section 2; I neither fill in estimates nor extrapolate.
+- verify/build/perf_O2_plain.txt and perf_O3_plain.txt are 26 bytes each, containing
+  /bin/sh: 3: IN: not found. They are stale garbage left by the single-character variable-escaping bug in
+  the Makefile at 23:08: $P was eaten by make, leaving only IN.
+
+  Those two files are **not valid measurements** and will be overwritten normally by the next make perf.
+  The bug has nothing to do with the library itself.
+- x4 covers add/sub/scale/lerp/madd; soa covers add/scale/dot/len/normalize. The frozen interface itself
+  has no dot_x4 / len_x4 / normalize_x4 / lerp_soa / sub_soa, so those cells read "no such entry point"
+  rather than "not measured".
+- In the collision microkernel, soa_hybrid vectorizes only the normalization stage. The reflection step
+  needs an element-wise dot product plus an element-wise scale, which the frozen interface cannot express,
+  because scale_soa takes a single scalar s; the reflection stage can only be a scalar loop. This matters
+  for P2's layout choice.

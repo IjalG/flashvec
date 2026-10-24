@@ -1,355 +1,642 @@
-# flashvec 优化报告
+# flashvec Optimization Report
 
-> 面向对象：flashvec 的作者（也就是你）。
-> 目标：把「往哪里优化、按什么顺序、每步值多少、代价是什么」讲清楚，并明确标出哪些是实测、哪些是推断。
-> 生成方式：四路并行调研（SIMD 硬件 / 算法借脑 / 数据布局 / 三档实测）+ 调度者本人的裁决实验与合成。
-> 原始材料在 docs/research/：simd-hardware.md、algorithm-tricks.md、layout-memory.md、measured.md，以及 raw/ 下的原始日志。
-> 本机：AMD Ryzen 7 5700U（Zen 2，8C/16T，L1d 32 KiB/核、L2 512 KiB/核、**L3 4 MiB/CCX × 2 CCX = 8 MiB 芯片总量，单线程可见 4 MiB**、行 64 B）；AVX2+FMA，无 AVX-512；g++ 12.4，Linux 6.17。
+> English | [简体中文](zh-CN/optimization-report.md)
+
+> Audience: the author of flashvec.
+> Goal: make "where to optimize, in what order, what each step is worth, and what it costs" clear, and
+> explicitly mark which parts are measured and which are inferred.
+> How this was produced: four parallel research tracks (SIMD hardware / ideas borrowed from other fields /
+> data layout / three-tier measurement) plus the dispatcher's own adjudication experiments and synthesis.
+> Source material lives in `docs/research/`: `simd-hardware.md`, `algorithm-tricks.md`,
+> `layout-memory.md`, `measured.md`.
+> `raw/` holds the raw logs.
+> Machine: AMD Ryzen 7 5700U (Zen 2, 8C/16T), AVX2+FMA, no AVX-512, g++ 12.4, Linux 6.17.
+> Cache: L1d 32 KiB/core, L2 512 KiB/core, **L3 4 MiB/CCX × 2 CCX = 8 MiB per chip, 4 MiB visible to one
+> thread**, 64 B lines.
 
 ---
 
-## 0. 一页版
+## 0. One-Page Summary
 
-**五条定论**（按「改了能换回多少」排序）：
+**Five conclusions** (ordered by "how much do I get back if I change this"):
 
-| # | 结论 | 证据强度 | 改造量 |
+| # | Conclusion | Strength of evidence | Size of change |
 |---|---|---|---|
-| 1 | **规模决定一切**：同一份代码在 L1/L2 驻留时是 6–14x，在 24 MB 工作集时是 0.8–1.4x（撞内存墙）。不报工作集的加速比没有意义 | 本机实测（三档 × 三规模 + 我的独立复跑） | 0（认知） |
-| 2 | **调用边界是一阶瓶颈**，不是位宽、不是 ABI、不是 FLOPs：库调用 1.657 / 内联 0.565 / 256-bit 打包 0.214 ns·元素⁻¹。边界成本 ≈4.2 cycle，是打包收益 ≈1.3 cycle 的 3 倍。现状只跑到 FP 峰值的约 1% | 三路独立实证 + 我的复算 | 中（批量入口） |
-| 3 | **-fno-math-errno 是零语义代价的最大单笔收益**：fv_vec3_normalize 指令数 40→26（我复算），含 sqrtf 的循环从「拒绝向量化」变成「32 字节向量化」，数值逐位不变 | 本机实测（A / D 双向 + 我复算） | 小（一个编译开关） |
-| 4 | **卡住自动向量化的不是 sqrt，是「条件执行的除法」**（零向量保护的分支）。手写掩码 SIMD 能在不放宽 FP 语义的前提下拿到 8.4x / 14.5x，并与标量路径逐位一致 | 本机实测（D，含 GCC 原文与 bits_equal=1） | 中（几十行 intrinsics） |
-| 5 | **精度问题先换算法，别换标量类型**：谐振子能量漂移，半隐式欧拉 float 5.522e-2 ≈ double 5.521e-2（换 double 只改善 0.02%），而速度 Verlet 是 2.744e-3（20 倍） | 本机实测（B） | 0（引擎选型） |
+| 1 | Scale decides everything | Measured on this machine (three tiers × three sizes + my own independent rerun) | 0 (awareness) |
+| 2 | The call boundary is a first-order bottleneck | Three independent lines of evidence + my own recomputation | Medium (batch entry points) |
+| 3 | `-fno-math-errno` is the largest single win at zero semantic cost | Measured on this machine (A / D both directions + my recomputation) | Small (one compiler flag) |
+| 4 | What blocks auto-vectorization is the "conditionally executed division", not sqrt | Measured on this machine (D, including GCC's verbatim verdict and bits_equal=1) | Medium (a few dozen lines of intrinsics) |
+| 5 | For accuracy problems, change the algorithm first, not the scalar type | Measured on this machine (B) | 0 (engine selection) |
 
-**一条方法论**（我自己踩坑换来的，见 §4.8）：**不校验结果的基准会产生非常有说服力的错误结论。** 我第一次裁决实验的三条路径里两条算错了，误差恰好 4 倍，而「性能数字」看起来很合理。
+The five, expanded:
 
-**一句话行动建议**：先给库加**批量入口**（AoS 4 路交错 _x4 优先），顺手开 -fno-math-errno；**不要**先手写 intrinsics、不要换 double、不要引入模板或纯 SoA 契约。
+1. **Scale decides everything**: the same code is 6–14x when L1/L2-resident and 0.8–1.4x on a 24 MB
+   working set, where it is bound by memory bandwidth. A speedup quoted without a working-set size means
+   nothing.
+2. **The call boundary is a first-order bottleneck** — not lane width, not the ABI, not FLOPs: library call
+   1.657 / inlined 0.565 / 256-bit packed 0.214 ns·element⁻¹.
+   The boundary cost is ≈4.2 cycles, 3x the ≈1.3 cycle packing win. Today the code reaches about
+   1% of FP peak.
+3. **`-fno-math-errno` is the largest single win at zero semantic cost**: `fv_vec3_normalize` goes from
+   40 to 26 instructions (my recomputation), loops containing `sqrtf` move from "vectorization refused" to
+   "vectorized at 32 bytes", and the numbers are bit-identical.
+4. **What blocks auto-vectorization is not sqrt but the "conditionally executed division"** — the branch of
+   the zero-vector guard. A hand-written masked SIMD kernel gets 8.4x / 14.5x without relaxing any FP
+   semantics, and is bit-identical to the scalar path.
+5. **For accuracy problems, change the algorithm, not the scalar type**: for the harmonic oscillator's
+   energy drift, semi-implicit Euler gives 5.522e-2 in float vs 5.521e-2 in double (switching to double
+   buys 0.02%), while velocity Verlet gives 2.744e-3 (20x).
+
+**One methodological rule**, see §4.8: **a benchmark that does not verify its results produces very
+convincing wrong conclusions.** Two of the three paths in my first adjudication experiment were
+miscalculated — off by exactly 4x — and the "performance numbers" looked perfectly reasonable.
+
+**One-line recommendation**: give the library **batch entry points** first, AoS 4-way interleaved `_x4`
+before anything else, and turn on `-fno-math-errno` at the same time.
+
+**Do not** start with hand-written intrinsics, do not switch to double, do not introduce templates or a pure
+SoA contract.
 
 ---
 
-## 1. 这份报告怎么来的（先看可信度）
+## 1. How This Report Came About (Read This First for Credibility)
 
-### 1.1 分工
+### 1.1 Division of Labor
 
-| 角色 | 内容 | 产物 |
+| Role | Content | Artifact |
 |---|---|---|
-| 调研 A | SIMD / 编译器向量化 / Zen 2 硬数字 / 参考库解剖 | docs/research/simd-hardware.md |
-| 调研 B | 逼近算法、数值稳定性、竞赛编程常数套路迁移、物理仿真接口 | docs/research/algorithm-tricks.md |
-| 调研 C2 | AoS/SoA/AoSoA、内存层次、批处理 API 形态 | docs/research/layout-memory.md |
-| 实现 D | 三档实现（标量 / 自动向量化 / 手写 AVX2）× 三规模实测 | docs/research/measured.md + bench/ |
-| 我 | 规划、验收、裁决实验、汇总与判断 | 本报告 |
+| Research A | SIMD / compiler vectorization / Zen 2 hard numbers / reference-library dissection | `docs/research/simd-hardware.md` |
+| Research B | Approximation algorithms, numerical stability, porting competitive-programming constant-factor tricks, physics-simulation interface needs | `docs/research/algorithm-tricks.md` |
+| Research C2 | AoS/SoA/AoSoA, memory hierarchy, batch-API forms | `docs/research/layout-memory.md` |
+| Implementation D | Three-tier implementation (scalar / auto-vectorized / hand-written AVX2) × three sizes, measured | `docs/research/measured.md` + `bench/` |
+| Me | Planning, acceptance, adjudication experiments, synthesis and judgement | This report |
 
-过程诚实披露：第一任「数据布局」调研员 80 分钟未交付，被我中止并换了 C2（约 15 分钟交付）。C2 的产物我不采信任何未交叉印证的量化结论。
+Process disclosure: the first "data layout" researcher delivered nothing in 80 minutes, so I stopped it and
+swapped in C2; C2 delivered in about 15 minutes.
 
-### 1.2 本机测量的三个硬限制（读数字前必须知道）
+For C2's output I trust no quantitative conclusion that has not been cross-confirmed.
 
-1. **perf 不可用**：kernel.perf_event_paranoid = 4、无 CAP_PERFMON、sudo 需要密码。所以没有 IPC / cache-miss / branch-miss 计数器；报告改用「GCC 向量化裁决原文 + 反汇编 + 分级内存带宽实测」作为替代证据。想补齐：sudo sysctl -w kernel.perf_event_paranoid=1 然后 make bench-perf。
-2. **笔记本变频**：实测频率在 1.64–3.97 GHz 漂移，同一份代码两次测量可以差 25%。因此**所有小于 20% 的差异一律不作结论**；跨次运行的绝对 ns 不可比，只用同一次运行内的比值。
-3. **共享机**：测量期间 loadavg 3–6。所有关键结论至少有两个独立来源交叉印证。
+### 1.2 Three Hard Limits of Measurement on This Machine (Know These Before Reading Any Number)
 
-### 1.3 我独立复算过的事（不是转述）
+1. **perf is unavailable**: `kernel.perf_event_paranoid = 4`, no CAP_PERFMON, sudo needs a password. So
+   there are no IPC / cache-miss / branch-miss counters.
+   - The report substitutes "GCC's verbatim vectorization verdicts + disassembly + tiered memory-bandwidth
+     measurements" as evidence.
+   - To fix: `sudo sysctl -w kernel.perf_event_paranoid=1`, then `make bench-perf`.
+2. **Laptop frequency scaling**: the measured clock drifts between 1.64 and 3.97 GHz, and two measurements
+   of the same code can differ by 25%. Therefore **no difference below 20% is ever treated as a
+   conclusion**.
+   - Absolute ns figures are not comparable across runs; only ratios within one run are used.
+3. **Shared machine**: loadavg 3–6 during measurement. Every key conclusion has at least two independent
+   sources cross-confirming it.
 
-| 复算项 | 子代理的说法 | 我实测 | 判定 |
-|---|---|---|---|
-| -fno-math-errno 对 fv_vec3_normalize 的影响 | 48 → 22 条指令 | **40 → 26 条指令**（objdump 计数） | 量级成立、口径有差；报告采用我的数 |
-| 库调用阻断向量化 | missed: statement clobbers memory | 同样原文复现（-fopt-info-vec-missed） | 成立 |
-| __builtin_cpu_supports 返回值 | 位掩码，须写 != 0 | sse2=16 avx2=1024 avx512f=0 | 成立 |
-| D 的三档基准可复现性 | x6–14（N=8192）/ x0.8–1.4（N=1<<20） | 自己重跑 make bench，同一形态 | 成立 |
-| hadd 归约快慢（A 与 D 结论相反） | A：慢；D：反而快 22% | 我写决定性实验：**hadd 慢约 2 倍** | **D 该条不采信**，见 §3.4 |
+### 1.3 What I Recomputed Independently (Not Second-Hand)
 
-### 1.4 尚未验证（不要当依据用）
+| Recomputation | Verdict |
+|---|---|
+| Effect of `-fno-math-errno` on `fv_vec3_normalize` | Order of magnitude holds, accounting differs; the report uses my numbers |
+| Library calls block vectorization | Holds |
+| `__builtin_cpu_supports` return values | Holds |
+| Reproducibility of D's three-tier benchmarks | Holds |
+| Whether hadd reduction is fast or slow (A and D disagree) | **D's claim not accepted**, see §3.4 |
 
-- AoS↔SoA **拆装成本**未实测——当前最大的未知数，直接影响「SoA 入口值不值得」。
-- 跨域（整数↔浮点）转发惩罚、store-forwarding 失败惩罚、AVX2 降频幅度：perf 受限未测。**在实测之前，不要拿网上「AVX2 会降频」当设计依据。**
-- Zen 2 的 vgatherdps 慢：A 实测约 10 cycle/条（成立）；但「索引变体一律不如掩码变体」属推断。
-- minps/maxps 与 fminf 的 NaN 语义差异、fv_abs 的降级指令：未核实。
-- 「double 会让 SoA 批量吞吐减半」：推断，未实测。
-- 证据内部漂移：raw/membw.txt 与 measured.md §3.3 粘贴的同一组带宽数据相差 10–15%（write 12.33 vs 14.05）。以 raw/ 为准；**10% 以内的差距在这台机器上不该当结论**。
+Item by item:
+
+- `-fno-math-errno` on `fv_vec3_normalize`: the subagent reported 48 → 22 instructions; I measured
+  **40 → 26 instructions** (objdump count).
+- Library calls block vectorization: the subagent cited `missed: statement clobbers memory`; I reproduced
+  the identical message with `-fopt-info-vec-missed`.
+- `__builtin_cpu_supports` return values: the subagent said it returns a bitmask and you must write
+  `!= 0`; I measured `sse2=16 avx2=1024 avx512f=0`.
+- Reproducibility of D's three-tier benchmarks: the subagent reported x6–14 (N=8192) / x0.8–1.4
+  (N=1<<20); I reran `make bench` myself and got the same shape.
+- Whether hadd reduction is fast or slow: A said slow, D said 22% faster; I wrote a decisive experiment,
+  and the verdict is **hadd is about 2x slower**.
+
+### 1.4 Not Yet Verified (Do Not Use as a Basis)
+
+- AoS↔SoA **conversion cost** has not been measured. This is the biggest unknown right now, and it
+  directly determines whether a SoA entry point is worth it.
+- Cross-domain (integer↔float) forwarding penalties, store-forwarding failure penalties, AVX2 downclocking:
+  not measured — perf is unavailable here. **Until you measure it, do not use the internet's "AVX2 downclocks" as a
+  design basis.**
+- Zen 2's `vgatherdps` is slow: A measured about 10 cycles/instruction (holds); but "the index variant is
+  always worse than the mask variant" is an inference.
+- The NaN semantics difference between `minps`/`maxps` and `fminf`, and the fallback instruction for
+  `fv_abs`: not verified.
+- "double would halve SoA batch throughput": inference, not measured.
+- Internal drift of the evidence: the same bandwidth data pasted in `raw/membw.txt` and `measured.md`
+  §3.3 differs by 10–15%, write 12.33 vs 14.05.
+- `raw/` is authoritative. **A gap under 10% should not be treated as a conclusion on this machine.**
 
 ---
 
-## 2. 第一结论：规模决定一切
+## 2. First Conclusion: Scale Decides Everything
 
-D 的三档实测（ns/元素，5 次中位数；档1 = 现有标量 API，档2 = 朴素 for + 自动向量化，档3 = 手写 AVX2；我用 make bench 独立复跑后形态一致）：
+D's three-tier measurements, in ns/element, median of 5 runs. Tier 1 = the existing scalar API, tier 2 = a
+naive for loop + auto-vectorization, tier 3 = hand-written AVX2.
 
-| 运算 | 档1 | 档2 | 档3 | 档1 | 档2 | 档3 |
+After rerunning `make bench` myself, the shape is identical.
+
+| Operation | Tier 1 | Tier 2 | Tier 3 | Tier 1 | Tier 2 | Tier 3 |
 |---|---|---|---|---|---|---|
-| （N） | 8192 | 8192 | 8192 | 1048576 | 1048576 | 1048576 |
+| (N) | 8192 | 8192 | 8192 | 1048576 | 1048576 | 1048576 |
 | add | 1.52 | 0.24 (**x6.30**) | 0.23 (**x6.54**) | 5.33 | 5.48 (x0.97) | 6.77 (x0.79) |
 | scale | 2.21 | 0.16 (**x13.46**) | 0.17 (**x13.23**) | 4.19 | 4.32 (x0.97) | 4.01 (x1.05) |
-| dot | 2.68 | 0.76 (x3.52) | 0.32 (x8.34)；4 累加器 **0.14 (x18.78)** | 3.53 | 2.59 (x1.36) | 2.60 (x1.36) |
-| len | 1.96 | 1.56 (x1.25)；加 -fno-math-errno 后 **0.24 (x8.16)** | 0.20 (**x9.63**) | — | — | — |
+| dot | 2.68 | 0.76 (x3.52) | 0.32 (x8.34); 4 accumulators **0.14 (x18.78)** | 3.53 | 2.59 (x1.36) | 2.60 (x1.36) |
+| len | 1.96 | 1.56 (x1.25); **0.24 (x8.16)** with `-fno-math-errno` | 0.20 (**x9.63**) | — | — | — |
 | normalize | 2.85 | 2.50 (x1.14) | 0.34 (**x8.41**) | — | — | — |
 | collision | 7.96 | 3.97 (x2.01) | 0.55 (**x14.51**) | 9.56 | 7.11 (x1.34) | 6.78 (x1.41) |
 
-（collision = 「法线归一化 + 速度反射」批量微内核，代表真实物理循环的形态。）
+`collision` is a batch microkernel for "normalize the normal + reflect the velocity", representing the
+shape of a real physics loop.
 
-**为什么大数组上三档全部拉平**：bench/membw.c 实测本机三重流带宽只有 6.0–6.9 GB/s（memcpy 8.9–17.2 GB/s）。一个 vec2 加法逻辑访存 24 B/元素（读 2 写 1），6.9 GB/s 下的理论下限 ≈**3.5 ns/元素**；实测档1 5.3、档3 6.8，三档都贴在这堵墙上。
+**Why all three tiers flatten out on large arrays**: `bench/membw.c` measures this machine's three-stream
+bandwidth at only 6.0–6.9 GB/s, with memcpy at 8.9–17.2 GB/s.
 
-**拐点必须按「单线程可见的 L3」算，不是按芯片总量**（旧版这里算错过，见下）：本机 L3 是
-**4 MiB/CCX × 2 CCX = 8 MiB 芯片总量**，`/sys/devices/system/cpu/cpu0/cache/index3` 报
-`level=3, size=4096K, shared_cpu_list=0-7` —— 一个线程跑在一个 CCX 上，**只吃得到 4 MiB**。
-于是拐点是 **4 MiB ÷ 24 B ≈ 1.75×10⁵ 个活跃元素**（旧版写的 3×10⁵ 是按 8 MiB 算的，高了一倍）。
-这条拐点有直接实测：同进程 A/B 夹具在 **2^17（工作集 3 MB）测得 38–57 GB/s，2^18（6 MB）掉到
-5.6–8.8 GB/s** —— 断崖正好压在这条线上。按下面的真实流量（32 B/元素）算，拐点还要再往前挪到
-约 1.3×10⁵。
+A vec2 add touches 24 B/element of logical memory traffic (2 reads, 1 write); at 6.9 GB/s the theoretical
+floor is ≈**3.5 ns/element**.
 
-**一个必须说清的修正**：N=8192 的 8–14x 是**工作集约 192 KB 的 L2 驻留数字**，不是 L1 峰值。这个规模恰好落在真实引擎「每帧活跃体」的区间，所以结论可迁移；但它不是「随便多快都行」的承诺。
+Measured tier 1 is 5.3 and tier 3 is 6.8 — all three tiers sit right against that bandwidth ceiling.
 
-**推论（对你最有用的一条）**：
-- 物理引擎每帧处理**几千～几万**个活跃体 → 落在「SIMD 收益兑现」一侧，批量入口值钱。
-- 一旦到**百万级**，换指令没用，**只能减少访存**：跳过休眠体、降精度、分块、别把不必要的量存下来。这与 B 的「休眠体跳过」、C2 的「掩码变体」是同一件事的三种说法。
+**The knee must be computed from "L3 visible to one thread", not from the per-chip total.** An earlier
+version got this wrong here; what was wrong is explained below.
 
-### 2.1 字节账：名义流量 vs 含 RFO 的真实流量（`_stream` 收益的物理来源）
+This machine's L3 is **4 MiB/CCX × 2 CCX = 8 MiB per chip**.
 
-上面一直在用**名义**字节（读 + 写）。但普通 store 在写 miss 时，CPU 会把整条 cache line
-**先读进来**（RFO, read-for-ownership），真实流量是「写一次 + 读一次」。所以每元素的账要写两列：
+`/sys/devices/system/cpu/cpu0/cache/index3` reports `level=3, size=4096K, shared_cpu_list=0-7`.
 
-| 入口 | 名义 B/元素 | 真实 B/元素 | 说明 |
-|---|---|---|---|
-| `add_x4` / `sub_x4` / `lerp_x4` / `madd_x4` / `add_soa` | 24（16 读 + 8 写） | **≈32**（+8 RFO） | 输出数组被多读一遍 —— 这就是 NT store 能省下的那 8 B |
-| `scale_x4` / `scale_soa` | 16（8 读 + 8 写） | ≈24（+8 RFO） | 同上，只是读少一路 |
-| `dot_soa`（vec2，以及 vec3/vec4 的同名入口） | **16**（ax/ay/bx/by 四条 `float` 数组 × 4 B） | 16（纯读，不写 → 无 RFO） | **口径提醒：是 16 B，不是 32 B** —— 每元素只读 4 个 float（曾按 32 B 记过，是错的） |
-| `normalize_soa` | **16**（8 读 + 8 写） | ≈24（+8 RFO） | **口径提醒：8 读 + 8 写 = 16 B，不是 16+16**（曾按 16+16 记过，是错的） |
-| `*_stream`（NT store） | 24（与普通版相同） | **24**（无 RFO） | 真实收益不是「每字节更快」，而是**少走 25% 的字节** |
+A thread runs on one CCX and **can only reach 4 MiB**.
 
-两条由此得到的判据（`bench/ab` 的读数规则就是按这个写的）：
+So the knee is **4 MiB ÷ 24 B ≈ 1.75×10⁵ active elements**. The earlier version wrote 3×10⁵, computed from
+8 MiB, i.e. twice as high.
 
-1. 同一个 add 算子，普通版与 `_stream` 版的**真实** GB/s 应基本相等（都顶在 DRAM 带宽上），
-   而**名义** GB/s 差 1.33 倍。如果名义与真实都差 1.33 倍，说明增益不是流量带来的 —— 这是
-   识别假阳性的一把尺子。
-2. NT store 只在**工作集远超 L3、写流是干净的一次性写**时才有这 25%；工作集落在 L2/L3 里时
-   它比普通版慢 **2–8 倍**（L2 内实测 **0.13–0.51x**，6 个入口全部判 FAIL(变慢)）。上限按入口
-   形状逐个数：add 系 **32/24 = 1.333**、scale 与 normalize **24/16 = 1.500**；实测 PASS 点
-   1.29–1.58x，4M 档配对 IQR 66–98%，**单点超过上限 20% 以内属噪声**（详见
-   `docs/acceptance-protocol.md` §9）。
+That knee has direct measurement behind it: an in-process A/B harness measured **38–57 GB/s at 2^17
+(3 MB working set) and 5.6–8.8 GB/s at 2^18 (6 MB)** — the cliff sits exactly on that line.
 
----
+Using the real traffic below (32 B/element), the knee moves further forward to about 1.3×10⁵.
 
-## 3. 五条主线的展开
+**One correction that has to be stated**: the 8–14x at N=8192 is an **L2-resident figure for a working set
+of about 192 KB**, not an L1 peak.
 
-### 3.1 调用边界是一阶瓶颈（三路独立实证 + 我的复算）
+That size happens to land in the range of a real engine's "active bodies per frame", so the conclusion
+transfers; but it is not a promise that "any speed is fine".
 
-同一份 AoS 数据（24 KB，全在 L1）、同一次运行内：
+**Inference (the most useful one for you)**:
 
-| 形态 | ns/元素 |
-|---|---|
-| 现有 API（fv_vec2_add，跨 TU 调用） | 1.657 |
-| 同代码放进头文件内联 | 0.565 |
-| 256-bit 打包（一次处理 4 个 vec2） | **0.214** |
+- A physics engine processes **a few thousand to a few tens of thousands** of active bodies per frame → it
+  falls on the "SIMD pays off" side, and batch entry points are worth it.
+- Once you reach **millions**, changing instructions is useless; **the only lever is reducing memory
+  traffic**: skip sleeping bodies, lower precision, tile the work, and do not store quantities you do not
+  need. This is the same thing as B's "sleeping-body skipping" and C2's "mask variant", stated three ways.
 
-- **边界成本 = 1.657 − 0.565 = 1.09 ns/元素 ≈ 4.2 cycle**；**打包收益 = 0.565 − 0.214 = 0.35 ns/元素 ≈ 1.3 cycle**。边界是打包收益的 3 倍。
-- 结构性证据（不是估算）：链接现有 libflashvec.a 的消费端里，一段 for 循环调用编译出 **5 处对外部 fv_vec2_xxx 的 call**；开 -flto 后 **0 处**。GCC 直接拒绝向量化：missed: statement clobbers memory —— **不透明的 extern "C" 调用被当成「可能写内存」**。
-- **ABI 不背锅**：fv_vec2（8 B）走 1 个 xmm、fv_vec3（12 B）走 2 个，都不落栈；fv_vec2_add 的函数体就是 addps %xmm1,%xmm0; ret。**不要为了「减少拷贝」改签名。**
-- 现状吞吐 ≈ 2 FLOP ÷ 1.657 ns ≈ **1.2 GFLOP/s**，本机 FP32 峰值约 130 GFLOP/s——**只跑到峰值的 1%**。瓶颈离「算术」还很远。
+### 2.1 Byte Accounting: Nominal Traffic vs Real Traffic with RFO (Where the `_stream` Win Physically Comes From)
 
-**动作**：批量入口，且 **AoS 4 路交错（_x4）优先于纯 SoA**——一个 ymm 正好装 4 个 fv_vec2，连续元素零重排，调用方一行不用改（§4.6）。
+Everything above uses **nominal** bytes (reads + writes). But on a write miss, an ordinary store makes the
+CPU **fetch the whole cache line first** — that is RFO (read-for-ownership). Real traffic is "one write plus
+one read".
 
-### 3.2 -fno-math-errno：零语义代价、当天可做
+So the per-element accounting needs two columns:
 
-- 默认 sqrtf 带 errno 语义 → 生成分支 + 库调用。我复算：fv_vec3_normalize 指令数 **40 → 26**（A 报 48→22，同一方向）。
-- D 的端到端效果：同一段 len 循环 **x1.25 → x8.16**（1.56 → 0.2395 ns/元素），**数值逐位不变**（DIFF 全 0）。
-- 为什么不是 -ffast-math：它会一并打开 -ffinite-math-only（假定无 NaN/Inf）与重结合，而 flashvec 的契约（零向量返回零向量、不放 NaN）依赖这些语义。**要快就给 _fast 变体，别动全局开关。**
-- 注意：-ffast-math 下 GCC 会把 1.0f/sqrtf(x) 自动编成 vrsqrtss + 1 次牛顿（B 用 objdump 实测），即静默掉到约 3 ulp；而 1.0f/x 在任何选项下都是 vdivss（GCC 不生成 rcpps）。
-
-### 3.3 卡住自动向量化的是「条件执行的除法」，不是 sqrt
-
-D 抓到的 GCC 原文裁决：-O3 -march=native 下 len / normalize / collision 全是 missed: not vectorized: control flow in loop.
-
-| 运算 | 只加 -fno-math-errno（零数值代价） | 要 -ffast-math 才能解锁 | 手写掩码 SIMD |
-|---|---|---|---|
-| len | 是：x1.25 → **x8.16** | — | x9.63 |
-| normalize | 否（仍不向量化） | 是：x1.14 → x9.84 | **x8.41** |
-| collision | 否 | 是：x2.01 → x13.53 | **x14.51** |
-
-**结论**：手写 AVX2 用 _mm256_cmp_ps + _mm256_and_ps 把「零向量保护」写成无分支掩码，在不放宽任何 FP 语义的前提下拿到 8.4x / 14.5x，且与标量路径**逐位一致**（IDENT bits_equal=1）。这回答了「flashvec 要不要 SIMD 实现分支」：**要，但只在批量入口里要**——单元素 fv_vec2_normalize 永远被调用开销主导。
-
-### 3.4 归约写法：4 累加器 + 末端一次归约（附：我如何裁决一条矛盾结论）
-
-A 说「hadd 归约慢」，D 说「hadd 反而比单累加器 shuffle 版快 22%」。两个结论符号相反。我写了决定性实验（三条路径**先校验正确性**再计时，taskset -c 2，200 次取最小值）：
-
-| dot 归约写法（8-wide） | n=8192 | n=262144 |
+| Entry point | Nominal B/element | Real B/element |
 |---|---|---|
-| 每 8 元素 hadd×2 归约一次 | 0.2507 | 0.1359 |
-| 每 8 元素 shuffle+add 归约一次 | 0.1284 | 0.1068 |
-| **4 个独立累加器 + 末端一次归约** | **0.0868** | **0.0912** |
+| `add_x4` / `sub_x4` / `lerp_x4` / `madd_x4` / `add_soa` | 24 (16 read + 8 write) | **≈32** (+8 RFO) |
+| `scale_x4` / `scale_soa` | 16 (8 read + 8 write) | ≈24 (+8 RFO) |
+| `dot_soa` (vec2, and the same-named entry points for vec3/vec4) | **16**, four `float` arrays ax/ay/bx/by × 4 B | 16 (read-only, no writes → no RFO) |
+| `normalize_soa` | **16** (8 read + 8 write) | ≈24 (+8 RFO) |
+| `*_stream` (NT store) | 24 (same as the ordinary version) | **24** (no RFO) |
 
-（三条路径在同一参考输入上都给出 2080.0 = 正确值。）
+Notes per entry point:
 
-- **裁决：hadd 确实慢（约 2 倍）**，与 A 一致。D 那条 22% 的差异落在它自己声明的 25% 变频噪声带内，且符号相反——**不采信**。
-- 更要紧的一层：**真正的杠杆是「归约频率」而不是「归约指令」**。每 8 个元素归约一次（0.13–0.25）与末端一次归约（0.087）是 1.5–2.9 倍差距。这条比 hadd/shuffle 之争重要得多。
-- D 的同一发现：单累加器 0.3213 → 4 累加器 0.1428（**x2.25**）。A 的「要打满 FMA 需要 ≥10 条独立链」与 B 的「8 路累加器」是**同一个技巧**——在吞吐与数值稳定性上双赢（§3.5）。
+- `add_x4` / `sub_x4` / `lerp_x4` / `madd_x4` / `add_soa`: the output array gets read one extra
+  time, and that is exactly the 8 B an NT store saves.
+- `scale_x4` / `scale_soa`: same, just with one fewer read stream.
+- `dot_soa`: **accounting reminder: it is 16 B, not 32 B**. Each element reads only 4 floats; it was once
+  recorded as 32 B, which was wrong.
+- `normalize_soa`: **accounting reminder: 8 read + 8 write = 16 B, not 16+16**. It was once recorded as
+  16+16, which was wrong.
+- `*_stream`: the real win is not "faster per byte" but **25% fewer bytes moved**.
 
-### 3.5 精度：换算法 > 换标量类型
+Two criteria follow, and `bench/ab`'s reading rules are written from them:
 
-| 场景 | float | double | 结论 |
-|---|---|---|---|
-| 谐振子 6e4 步，半隐式欧拉（最大能量漂移） | 5.522e-2 | 5.521e-2 | 换 double 只改善 **0.02%** |
-| 同一谐振子，**速度 Verlet** | **2.744e-3** | 2.740e-3 | 换积分器改善 **20 倍** |
-| x += v*dt，1e6 步（相对误差） | 2.422e-3 | 0（double 累加） | 换累加结构（Kahan）= 2.597e-8 |
-| 1e6 个 0.1f 求和 | 9.863e-3（0.926 ns/add） | — | **8 路累加器：1.036e-3 且只要 0.338 ns/add**（又快又准） |
-
-- 辛积分器的漂移是**算法性、有界**的（步数 ×10 后基本不变）；float→double 换不来这个。
-- Kahan vs Neumaier：教科书反例 {1, 1e30, 1, -1e30}（精确值 2）上，朴素 = 0、**Kahan = 0（小项被大项吃掉）**、Neumaier = 2.000 正确 → 默认选 Neumaier（只比朴素慢约 20%）。
-- **动作**：fv_real 保持 float。给引擎侧补累加器形态（fv_kahan2 / fv_neumaier2）与批量归约入口，别动默认语义。
+1. For the same add operator, the **real** GB/s of the ordinary and `_stream` versions should be
+   essentially equal, both pinned at DRAM bandwidth, while the **nominal** GB/s differ by 1.33x.
+   If both nominal and real differ by 1.33x, the gain is not coming from traffic. This is the ruler for
+   spotting false positives.
+2. An NT store only gets that 25% when the **working set is far larger than L3 and the write stream is a
+   clean one-shot write**. When the working set fits in L2/L3 it is **2–8x slower** than the ordinary
+   version; measured inside L2 it is **0.13–0.51x**, and all 6 entry points are judged FAIL (slower).
+   The ceiling is counted per entry-point shape: add family **32/24 = 1.333**, scale and normalize
+   **24/16 = 1.500**.
+   Measured PASS points are 1.29–1.58x, and paired 4M-tier IQRs are 66–98%; **a single point exceeding the
+   ceiling by less than 20% is noise**. See `docs/acceptance-protocol.md` §9.
 
 ---
 
-## 4. 从别处借来的思路（我的部分）
+## 3. The Five Main Threads, Expanded
 
-每条给出：来源 → 它原本解决什么 → 在 flashvec 里是什么形态 → 代价。
+### 3.1 The Call Boundary Is a First-Order Bottleneck (Three Independent Lines of Evidence + My Recomputation)
 
-**4.1 列式数据库 / 向量化执行引擎（vector-at-a-time）**
-它们早就发现：逐行处理器的瓶颈是**逐元组的分派开销**，不是运算本身；解法是一次处理一批，把分派摊薄。这与 flashvec 完全同构——我们的「逐元组分派」就是「每个 vec2 一次 call」，实测边界成本 4.2 cycle 是打包收益 1.3 cycle 的 3 倍。**启示：先改处理粒度，再改指令。** 数据库还有一个更贴切的类比：它们的「向量」是列（SoA），而调用方持有的是行（AoS）——DuckDB 干脆在算子和存储层之间做一次布局转换，并明确承认转换成本。所以我们也不该假装转换免费（见 §1.4）。
+The same AoS data (24 KB, entirely in L1), within a single run:
 
-**4.2 编译器的「优化杠杆排序」**
-编译器不会先做寄存器分配再做内联——它按收益量级排 pass。把三份材料的数据按「每改一行为你换回多少」排序：
+| Form | ns/element |
+|---|---|
+| Existing API (`fv_vec2_add`, cross-TU call) | 1.657 |
+| Same code placed in a header and inlined | 0.565 |
+| 256-bit packed (4 vec2 per operation) | **0.214** |
+
+- **Boundary cost = 1.657 − 0.565 = 1.09 ns/element ≈ 4.2 cycles**; **packing win = 0.565 − 0.214 =
+  0.35 ns/element ≈ 1.3 cycles**. The boundary is 3x the packing win.
+- Structural evidence, not an estimate: in a consumer that links the existing `libflashvec.a`, a for loop
+  containing the call compiles to **5 calls to external `fv_vec2_xxx`**; with `-flto` it compiles to
+  **0**.
+- GCC refuses vectorization outright: `missed: statement clobbers memory`. **An opaque `extern "C"`
+  call is treated as "may write memory"**.
+- **The problem is not the ABI**: `fv_vec2` (8 B) goes in 1 xmm register, `fv_vec3` (12 B) in 2, neither
+  spills to the stack; the body of `fv_vec2_add` is exactly `addps %xmm1,%xmm0; ret`.
+- **Do not change the signature to "reduce copying".**
+- Current throughput ≈ 2 FLOP ÷ 1.657 ns ≈ **1.2 GFLOP/s** against this machine's FP32 peak of about
+  130 GFLOP/s, i.e. **only 1% of peak**. The bottleneck is still far from "arithmetic".
+
+**Action**: batch entry points, and **AoS 4-way interleaved (`_x4`) before pure SoA**. One ymm holds
+exactly 4 `fv_vec2`, with zero reshuffling for consecutive elements, and the caller does not change a
+single line — see §4.6.
+
+### 3.2 -fno-math-errno: Zero Semantic Cost, Doable Today
+
+- By default `sqrtf` carries errno semantics → a branch plus a library call. My recomputation:
+  `fv_vec3_normalize` goes from **40 to 26** instructions; A reported 48→22, the same direction.
+- D's end-to-end effect: the same len loop goes **x1.25 → x8.16** (1.56 → 0.2395 ns/element), with
+  **bit-identical numbers** (DIFF all 0).
+- Why not `-ffast-math`: it also turns on `-ffinite-math-only` and reassociation.
+- `-ffinite-math-only` assumes no NaN/Inf, while flashvec's contract (a zero vector normalizes to a zero
+  vector, no NaNs emitted) depends on those semantics.
+- **If you want speed, ship a `_fast` variant; do not touch the global switch.**
+- Note: under `-ffast-math`, GCC compiles `1.0f/sqrtf(x)` into `vrsqrtss` plus 1 Newton step (B
+  measured this with objdump), i.e. it silently drops to about 3 ulp.
+- Whereas `1.0f/x` is `vdivss` under any option; GCC does not generate `rcpps`.
+
+### 3.3 What Blocks Auto-Vectorization Is the "Conditionally Executed Division", Not sqrt
+
+The verbatim GCC verdict D captured: under `-O3 -march=native`, len / normalize / collision all report
+`missed: not vectorized: control flow in loop`.
+
+| Operation | `-fno-math-errno` alone (zero numerical cost) | Requires `-ffast-math` to unlock | Hand-written masked SIMD |
+|---|---|---|---|
+| len | Yes: x1.25 → **x8.16** | — | x9.63 |
+| normalize | No (still not vectorized) | Yes: x1.14 → x9.84 | **x8.41** |
+| collision | No | Yes: x2.01 → x13.53 | **x14.51** |
+
+**Conclusion**: hand-written AVX2 uses `_mm256_cmp_ps` + `_mm256_and_ps` to express the "zero-vector
+guard" as a branchless mask.
+
+It reaches 8.4x / 14.5x without relaxing any FP semantics, and is **bit-identical** to the scalar path
+(IDENT bits_equal=1).
+
+This answers "should flashvec have a SIMD implementation branch": **yes, but only inside batch entry
+points**. A single-element `fv_vec2_normalize` will always be dominated by call overhead.
+
+### 3.4 Writing a Reduction: 4 Accumulators + One Final Reduction (Plus: How I Adjudicated a Contradictory Conclusion)
+
+A says "hadd reduction is slow"; D says "hadd is 22% faster than the single-accumulator shuffle version".
+The two conclusions have opposite signs.
+
+I wrote a decisive experiment: all three paths **verify correctness first**, then time; `taskset -c 2`,
+200 runs taking the minimum.
+
+| dot reduction form (8-wide) | n=8192 | n=262144 |
+|---|---|---|
+| hadd×2 reduction every 8 elements | 0.2507 | 0.1359 |
+| shuffle+add reduction every 8 elements | 0.1284 | 0.1068 |
+| **4 independent accumulators + one final reduction** | **0.0868** | **0.0912** |
+
+All three paths give 2080.0 on the same reference input, which is the correct value.
+
+- **Verdict: hadd really is slow (about 2x)**, agreeing with A. D's 22% difference falls inside the 25%
+  frequency-scaling noise band D itself declared, and it has the opposite sign, so **it is not accepted**.
+- The more important layer: **the real lever is reduction *frequency*, not the reduction *instruction***.
+  Reducing every 8 elements (0.13–0.25) versus reducing once at the end (0.087) is a 1.5–2.9x gap. That
+  matters far more than the hadd/shuffle argument.
+- D's own finding on the same point: single accumulator 0.3213 → 4 accumulators 0.1428 (**x2.25**).
+- A's "you need ≥10 independent chains to saturate FMA" and B's "8-way accumulator" are **the same trick**,
+  and it wins on both throughput and numerical stability (§3.5).
+
+### 3.5 Accuracy: Changing the Algorithm > Changing the Scalar Type
+
+| Scenario | float | double | Conclusion |
+|---|---|---|---|
+| Harmonic oscillator, 6e4 steps, semi-implicit Euler (max energy drift) | 5.522e-2 | 5.521e-2 | double improves it by **0.02%** |
+| Same oscillator, **velocity Verlet** | **2.744e-3** | 2.740e-3 | changing the integrator improves it **20x** |
+| x += v*dt, 1e6 steps (relative error) | 2.422e-3 | 0 (double accumulation) | changing the accumulation structure (Kahan) = 2.597e-8 |
+| Summing 1e6 values of 0.1f | 9.863e-3 (0.926 ns/add) | — | **8-way accumulator: 1.036e-3 at only 0.338 ns/add** (both faster and more accurate) |
+
+- A symplectic integrator's drift is **algorithmic and bounded**; multiply the step count by 10 and it
+  barely changes. float→double does not buy that.
+- Kahan vs Neumaier: the textbook counterexample {1, 1e30, 1, -1e30} has exact value 2.
+- The three answers: naive = 0, **Kahan = 0, the small term swallowed by the large one**, Neumaier = 2.000,
+  correct. Default to Neumaier; it is only about 20% slower than naive.
+- **Action**: keep `fv_real` as float. Add accumulator forms (`fv_kahan2` / `fv_neumaier2`) and batch
+  reduction entry points on the engine side; do not change default semantics.
+
+---
+
+## 4. Ideas Borrowed from Elsewhere (My Part)
+
+Each entry gives: source → what it originally solved → what form it takes in flashvec → cost.
+
+**4.1 Columnar databases / vectorized execution engines (vector-at-a-time)**
+
+They found long ago that a row-at-a-time processor's bottleneck is **per-tuple dispatch overhead**, not the
+arithmetic itself. The fix is to process a batch at a time and amortize the dispatch.
+
+This is completely isomorphic to flashvec. Our "per-tuple dispatch" is "one call per vec2", and the measured
+4.2-cycle boundary cost is 3x the 1.3-cycle packing win. **Lesson: change the processing granularity before
+you change the instructions.**
+
+Databases offer an even closer analogy: their "vectors" are columns (SoA), while the caller holds rows
+(AoS). DuckDB simply performs one layout conversion between the operator and the storage layer, and openly
+admits the conversion cost. So we should not pretend conversion is free either — see §1.4.
+
+**4.2 The compiler's "ordering of optimization levers"**
+
+A compiler does not do register allocation before inlining; it orders passes by payoff magnitude. Sorting
+the data from the three inputs by "how much does changing this get me back":
 
 ~~~
-批量入口（消除跨 TU 调用 + 打包）   ≈ 6–14x     ← 一行调用形态的改变
--fno-math-errno（零语义代价）        ≈ 1.2–8x    ← 一个编译开关
-归约频率（4 累加器 / 末端归约）       ≈ 1.2–2.2x  ← 循环写法
-掩码替代分支（手写 SIMD 才需要）       ≈ 8–14x     ← 几十行 intrinsics，必须建立在上面三条之上
+batch entry points (eliminate cross-TU calls + packing)   ≈ 6–14x    ← one change in call shape
+-fno-math-errno (zero semantic cost)                      ≈ 1.2–8x   ← one compiler flag
+reduction frequency (4 accumulators / final reduction)    ≈ 1.2–2.2x ← loop structure
+mask instead of branch (hand-written SIMD only)           ≈ 8–14x    ← a few dozen lines of intrinsics,
+                                                                       and only on top of the three above
 ~~~
 
-**反面教材**：一上来就手写 intrinsics，等于在 1% 的利用率上做微观优化，收益会被调用边界（占 3 倍）吃掉一大半。
+**Counter-example**: starting with hand-written intrinsics means micro-optimizing at 1% utilization, and
+the call boundary eats most of the gain. The boundary cost is 3x the packing win.
 
-**4.3 竞赛编程（洛谷 / CF）的三条能迁移、三条不能**
-- 能：**不变量外提**——fv_vec2_project(v, onto) 里的 len_sqr(onto) 在一整批调用中是常量，提供 fv_vec2_project_inv(v, onto, inv_denom)。
-- 能：**先把问题规模降下来**——比较距离用 dist_sqr（已有）而不是 dist，这正是 Box2D 提供 b2DistanceSquared 的理由。**现状风险：fv_vec2_len 与 fv_vec2_dist 是全库最容易被误用的两个函数。**
-- 能：**手工展开的真实目的是打断依赖链**，不是少写几行（8 路累加器 0.338 vs 朴素 0.926 ns/add）。
-- 不能：**查表换计算**在 SIMD 下反了。sin 8-wide：多项式+FMA 1.663 ns/值（误差 1.19e-7）**快于** gather-LUT 4096 的 2.042（5.36e-7），也快于 glibc sinf 4.164。原因：随机索引要走 vgatherdps，Zen 2 的弱项（约 10 cycle/条）。查表只在「标量 + 表能常驻 L1」时划算。
-- 不能：**位运算替代取模/除法**——向量库没有索引运算，这条属于引擎的 broad-phase（哈希/排序键）。
-- 条件性：**无分支 min/max** 有真收益（near 型比较在 50% 命中率合成数据上 5.349→2.803 ns/call，1.9x），但这是最坏情况合成数据；且 minps/fminf 的 NaN 语义差异**未核实**，采用前必须查 SDM。
+**4.3 Three transferable and three non-transferable ideas from competitive programming (Luogu / CF)**
 
-**4.4 ML kernel 的两个套路**
-- **多累加器打依赖链**（GEMM 的标准手法）：在这里与数值分析的「多路部分和」是同一个东西——一个技巧同时买了吞吐和精度。**这种「两个维度同向受益」的改动永远优先做。**
-- **尾处理要显式设计**：n%4、n%8 的尾巴、掩码加载、以及「掩码外写回原值」的语义必须写进头文件——否则调用方会以为掩码意味着「不写」，从而写出脏数据。
+- Transferable: **hoisting invariants**. In `fv_vec2_project(v, onto)`, `len_sqr(onto)` is constant
+  across an entire batch of calls; provide `fv_vec2_project_inv(v, onto, inv_denom)`.
+- Transferable: **shrink the problem's scale first**. Compare distances with `dist_sqr` (already present)
+  rather than `dist` — exactly the reason Box2D provides `b2DistanceSquared`.
+  - **Current risk: `fv_vec2_len` and `fv_vec2_dist` are the two functions in this library most likely
+    to be misused.**
+- Transferable: **the real purpose of manual unrolling is to break dependency chains**, not to write fewer
+  lines: 8-way accumulator 0.338 vs naive 0.926 ns/add.
 
-**4.5 数据布局不是全局属性，是阶段属性（借 simdjson）**
-simdjson 的不同阶段用不同布局（结构扫描用位掩码流，重放阶段再按需展开）。同理，flashvec 不该宣布「我们是 AoS」或「改成 SoA」：**存放是 AoS，热循环里按读者需要临时成批**就够了。C2 总结的 PhysX 做法更贴近工程现实：不是全局 SoA，而是「热循环里被谁读，就为谁单独开一条数组」。
+- Not transferable: **trading computation for table lookups** reverses under SIMD.
+  - sin 8-wide: polynomial+FMA 1.663 ns/value (error 1.19e-7) is **faster than** gather-LUT 4096 at 2.042
+    (5.36e-7), and also faster than glibc `sinf` at 4.164.
+  - Reason: random indices need `vgatherdps`, which is a Zen 2 weak spot at about 10 cycles/instruction.
+  - Table lookup only pays off with "scalar + a table that stays resident in L1".
+- Not transferable: **replacing modulo/division with bit operations**. A vector library has no index
+  arithmetic; that belongs to the engine's broad-phase (hashing / sort keys).
+- Conditional: **branchless min/max** has a real payoff.
+  - near-type comparisons on synthetic data at 50% hit rate: 5.349→2.803 ns/call, 1.9x.
+  - But that is worst-case synthetic data; and the NaN semantics difference between `minps`/`fminf` is
+    **unverified**, so consult the SDM before adopting it.
 
-**4.6 ECS/引擎的「按消费者拆轴」+ 一条消解矛盾的具体设计**
-把「D 实测 SoA 批量 8–14x」与「物理引擎调用点本来就是 AoS 粒子数组」这对矛盾消解掉——不要二选一：
+**4.4 Two tricks from ML kernels**
+
+- **Multiple accumulators to break dependency chains** (the standard GEMM technique): here it is the same
+  thing as the numerical-analysis "multiple partial sums" — one trick that buys throughput and accuracy at
+  once. **Changes where both dimensions improve in the same direction are always done first.**
+- **The tail must be designed explicitly**: the n%4 and n%8 tails, masked loads, and the "write the original
+  value back outside the mask" semantics all have to be written into the header. Otherwise callers will
+  assume a mask means "do not write" and produce dirty data.
+
+**4.5 Data layout is not a global property, it is a per-stage property (borrowed from simdjson)**
+
+simdjson uses different layouts in different stages: structural scanning uses a bitmask stream, and the
+replay stage expands as needed.
+
+Likewise, flashvec should not declare "we are AoS" or "we are switching to SoA": **storage is AoS; inside
+hot loops you materialize a batch in whatever layout the reader wants** — that is enough.
+
+The PhysX practice C2 summarized is closer to engineering reality: not global SoA, but "for each hot loop,
+open a separate array for whoever reads it".
+
+**4.6 The ECS/engine practice of "splitting axes per consumer" + One Concrete Design That Resolves the Contradiction**
+
+Resolve the contradiction between "D measured 8–14x for SoA batches" and "physics-engine call sites already
+hold AoS particle arrays" without choosing one:
 
 ~~~c
-/* 一档：AoS 原样传入。库里一个 ymm 装 4 个 fv_vec2，零重排，调用方零改动 */
+/* Tier one: pass AoS as-is. One ymm in the library holds 4 fv_vec2, zero reshuffling, zero caller changes */
 void fv_vec2_add_x4  (const fv_vec2 * __restrict a, const fv_vec2 * __restrict b,
                       fv_vec2 * __restrict o, size_t n);
-/* 二档：归约型运算（dot / len / normalize），分量天然连续，SoA 更自然 */
+/* Tier two: reduction-style ops (dot / len / normalize); components are contiguous, so SoA is natural */
 float fv_vec2_dot_soa(const float *ax, const float *ay,
                       const float *bx, const float *by, size_t n);
-/* 每个批量入口都要配稀疏变体，否则休眠体跳过 / broad-phase 用不了 */
-void fv_vec2_add_x4_idx (..., const uint32_t *idx, size_t m);   /* 真跳过，代价是随机访存 */
-void fv_vec2_add_x4_mask(..., const uint8_t *mask, size_t n);   /* 整行读改写，掩码外写回原值 */
+/* Every batch entry point needs a sparse variant, or sleeping-body skipping / broad-phase cannot use it */
+void fv_vec2_add_x4_idx (..., const uint32_t *idx, size_t m);  /* true skip; the price is random memory access */
+void fv_vec2_add_x4_mask(..., const uint8_t *mask, size_t n);  /* whole-line RMW; original kept outside the mask */
 ~~~
 
-**4.7 把「可复现性 vs 性能」变成显式契约（D 的发现，我把它上升为设计原则）**
-D 实测：同一段 collision 逻辑，函数式 API 版本与内联版本在 **4948 / 8192 个元素上位模式不同**（约 7 ULP）——因为内联后编译器做了 FMA 收缩，而跨 TU 调用没有。这不是 bug，是**契约没写清**。建议在头文件里明确：
+**4.7 Turning "reproducibility vs performance" into an explicit contract (D's finding, raised here to a principle)**
 
-> 逐元素 API 保证逐位可复现（同输入同输出）；批量 / SIMD 入口不保证逐位一致，只保证误差上界。
+D measured: for the same collision logic, the functional-API version and the inlined version differ in their
+**upper bits on 4948 / 8192 elements** (about 7 ULP). The cause is that inlining lets the compiler do FMA
+contraction, while the cross-TU call does not.
 
-物理引擎调试期的「同一场景两次跑结果不同」是很贵的 bug，这条契约能省掉它。
+This is not a bug, it is **an unwritten contract**. Recommend stating it explicitly in the header:
 
-**4.8 一条元教训：基准必须校验结果**
-我自己犯了两次错：第一次三条路径里两条给出 **4 倍偏大**的结果（hadd×2 之后向量 lane 是 [S0,S0,S0,S0,S1,S1,S1,S1] 的重复填充，我用通用 8-lane 归约把它们计了 4 次），第二次修完仍差 2 倍。而这两版的**性能数字都很「合理」**——如果我不校验 sum，就会把一个错误的 hadd 结论写进报告。
+> The element-wise API guarantees bit-for-bit reproducibility (same input, same output); batch / SIMD entry
+> points do not guarantee bit-identical results, only a bound on error.
 
-推论（值得贴在墙上）：
-1. 任何微基准必须**同时打印结果校验值**，并与参考实现对比；
-2. 差异小于噪声带（本机 20–25%）的结论一律不成立，哪怕方向「符合直觉」；
-3. 报性能必须同时报**工作集大小 / 缓存层级 / 编译选项**——否则数字没有意义（§2 的全部意义在此）。
+"Two runs of the same scene give different results" during physics-engine debugging is an expensive bug;
+this contract removes it.
 
----
+**4.8 One meta-lesson: a benchmark must verify its results**
 
-## 5. 改造路线（分阶段，含验收标准）
+I made the mistake twice myself. The first time, two of three paths gave results **4x too large**: after
+hadd×2 the vector lanes are a repeated fill of [S0,S0,S0,S0,S1,S1,S1,S1].
 
-### P0 · 零语义代价，当天可做
-| 动作 | 预期 | 代价 | 验收 |
-|---|---|---|---|
-| Makefile 加 -fno-math-errno（可选再加 -O3） | len 类循环 x1.25 → x8.16，结果逐位不变 | 放弃「数学函数设 errno」（本库 sqrt 参数恒 ≥0） | make test 全绿 + 新旧产物逐位对拍 |
-| 新增 fv_vec2_min/max/clamp、fv_vec2_madd、fv_aabb2_merge/overlaps | 补上 broad-phase 与冲量累加的缺口（当前库里**没有任何 min/max/clamp**） | 十几个新符号 | 单元测试覆盖 NaN / 边界 |
-| **修 FV_EPS 量纲 bug**（§6 决策 1） | 消除 project 的 1000 倍宽松阈值 | 一行 | 新增断言：project(v, 极小 onto) 的行为 |
+I counted them 4 times with a generic 8-lane reduction. After fixing that, they were still off by 2x.
 
-### P1 · 批量入口（收益最大的一步）
-| 动作 | 预期 | 代价 | 验收 |
-|---|---|---|---|
-| fv_vec2_add/sub/scale/lerp_x4（AoS、零重排、__restrict） | N=8192 下 x6.3–13.2（手写 intrinsics 相对自动向量化只差 0–8%） | ≈60 行 + 尾巴处理 | 与标量路径**逐位一致**；n%4 边界测试 |
-| fv_vec2_dot/len/normalize_soa（无分支掩码 + 4 累加器） | normalize x8.41、collision x14.51、dot x18.8 | ≈150–250 行 | 与标量路径逐位一致；零向量不产生 NaN |
-| 索引 / 掩码变体 | 休眠体跳过的前置条件 | 符号数 +40% | 掩码外写回原值（不是「不写」） |
+And the **performance numbers of both versions looked perfectly "reasonable"**. Had I not verified the sum,
+I would have written a wrong hadd conclusion into the report.
 
-**重要**：先做 _x4，**不要**反过来要求调用方（未来的物理引擎）先改数据布局。
+Three corollaries should be fixed in place:
 
-### P2 · 可选加速路径（等有性能数据之后）
-- fv_vec2_normalize_fast（rsqrtps + 1 次 NR）：0.3082 vs 0.3395 ns/元素（约 10%），误差 ≈2 ulp（4M 样本最大偏差 1.192e-07）。
-- include/flashvec_math.h（独立头）：atan 7 系数多项式 3.71 vs glibc 10.15 ns/call（误差 1.16e-6 rad）；sin poly7 1.663 ns/值。**输入域必须写清**（sin 要求 [-π, π]：float 参数归约在 [-1000π, 1000π] 上误差 8.742e-5，double 归约才 1.192e-7）。
-- 运行时派发：__attribute__((target("avx2,fma"))) 单函数 + __builtin_cpu_supports（位掩码，须写 != 0；反汇编是一次全局 load + test，开销可忽略）。
-
-### P3 · 不推荐 / 最后再说
-- 全局 -march=native：二进制绑死 znver2，换机 SIGILL。要发预编译库就上 target 属性 / 多版本派发。
-- 全链路 LTO：能把现有 API 的调用边界消掉（5 处 call → 0），但要求**消费端**也带 -flto，交出去一个预编译静态库就失效。
-- AoSoA / 纯 SoA 契约 / 模板表达式 / 内存池 / 全库 SIMD 复数：见 §7。
+1. Every microbenchmark must **print a result checksum at the same time**, and compare it against a
+   reference implementation.
+2. Any conclusion whose difference is smaller than the noise band (20–25% on this machine) does not hold,
+   even if the direction is "intuitive".
+3. Any performance claim must report **working-set size / cache level / compiler options** at the same time,
+   or the number is meaningless (this is the whole point of §2).
 
 ---
 
-## 6. 需要你拍板的四件事
+## 5. Roadmap (Staged, with Acceptance Criteria)
 
-1. **FV_EPS 量纲 bug 怎么修**：fv_vec2_project 用 fv_abs(len_sqr(onto)) <= FV_EPS 判断「onto 接近零」，而 len_sqr 是**平方量**——等价长度阈值 sqrt(1e-6) = 1e-3，比 normalize 的线性阈值松 **1000 倍**，头文件注释却把 FV_EPS 描述为统一的「足够接近零」阈值。（B 发现、我复核确认的真 bug，是我写代码时的疏忽。）
-   选项：① 与 normalize 对齐（len_sqr <= FV_EPS*FV_EPS）；② 拆成 FV_EPS 与 FV_EPS_SQR 两个常量；③ 维持现状但改注释。**我倾向 ②**（最不容易再错）。
-2. **要不要引入 _x4 / _soa API**：拿 API 面积换 6–14x。我倾向「要，且只加 _x4 与归约型 _soa」，因为调用方零改动是这套库能被用起来的前提。
-3. **要不要走 -march=native / 发预编译库**：我倾向「库自身保持通用 x86-64 基线 + 关键函数 target 属性派发」，避免「在你机器上快、在别人机器上 SIGILL」。
-4. **要不要把 -fno-math-errno 写进默认编译选项**：我倾向「要」——零数值代价、可验证（逐位对拍）。
+### P0 · Zero Semantic Cost, Doable Today
+
+**Add `-fno-math-errno` to the Makefile, optionally also `-O3`**
+
+- Expected: len-type loops x1.25 → x8.16, results bit-identical.
+- Cost: give up "math functions set errno". In this library the sqrt argument is always ≥0.
+- Acceptance: `make test` all green + bit-for-bit comparison of old and new artifacts.
+
+**Add `fv_vec2_min/max/clamp`, `fv_vec2_madd`, `fv_aabb2_merge/overlaps`**
+
+- Expected: close the gap for broad-phase and impulse accumulation. The current library has **no
+  min/max/clamp at all**.
+- Cost: a dozen or so new symbols.
+- Acceptance: unit tests covering NaN / boundaries.
+
+**Fix the `FV_EPS` dimensional bug** (§6, decision 1)
+
+- Expected: eliminate `project`'s 1000x loose threshold.
+- Cost: one line.
+- Acceptance: a new assertion checking the behavior of `project(v, tiny onto)`.
+
+### P1 · Batch Entry Points (The Biggest Single Step)
+
+**AoS 4-way interleaved: `fv_vec2_add/sub/scale/lerp_x4`**
+
+- Form: AoS, zero reshuffling, `__restrict`.
+- Expected: x6.3–13.2 at N=8192. Hand-written intrinsics are only 0–8% ahead of auto-vectorization.
+- Cost: ≈60 lines + tail handling.
+- Acceptance: **bit-identical** to the scalar path; n%4 boundary tests.
+
+**Reduction-style SoA: `fv_vec2_dot/len/normalize_soa`**
+
+- Form: branchless mask + 4 accumulators.
+- Expected: normalize x8.41, collision x14.51, dot x18.8.
+- Cost: ≈150–250 lines.
+- Acceptance: bit-identical to the scalar path; zero vectors produce no NaN.
+
+**Index / mask variants**
+
+- Expected: the precondition for sleeping-body skipping.
+- Cost: +40% symbol count.
+- Acceptance: the original value is written back outside the mask, not "not written".
+
+**Important**: do `_x4` first, and **do not** turn around and require the caller (a future physics engine)
+to change its data layout first.
+
+### P2 · Optional Fast Paths (Once There Is Performance Data)
+
+- `fv_vec2_normalize_fast` (`rsqrtps` + 1 NR): 0.3082 vs 0.3395 ns/element (about 10%), error ≈2 ulp
+  (max deviation 1.192e-07 over 4M samples).
+- `include/flashvec_math.h` (a separate header): atan with a 7-term polynomial 3.71 vs glibc 10.15 ns/call
+  (error 1.16e-6 rad); sin poly7 1.663 ns/value.
+- **The input domain must be stated**: sin requires [-π, π]. float argument reduction has error 8.742e-5
+  over [-1000π, 1000π], while double reduction gets 1.192e-7.
+- Runtime dispatch: a single function with `__attribute__((target("avx2,fma")))` +
+  `__builtin_cpu_supports`.
+- `__builtin_cpu_supports` returns a bitmask, so you must write `!= 0`; the disassembly is one global
+  load plus a test, negligible overhead.
+
+### P3 · Not Recommended / Defer
+
+- Global `-march=native`: binds the binary to znver2, and another machine gets SIGILL. If you ship prebuilt
+  libraries, use target attributes / multiversion dispatch.
+- Full-pipeline LTO: it removes the existing API's call boundary (5 calls → 0), but it requires the
+  **consumer** to also use `-flto`; hand out a prebuilt static library and it stops working.
+- AoSoA / pure SoA contract / expression templates / memory pool / SIMD complex numbers library-wide:
+  see §7.
 
 ---
 
-## 7. 明确不做的事（三份劝退清单合并）
+## 6. Four Decisions That Need Your Call
 
-1. **不要为 SIMD 把 fv_vec2 填充到 16 B**：8 B 正好 4 个进一个 ymm，是本机最优；填充后 _x4 每个寄存器只装 2 个，收益腰斩。
-2. **不要改 fv_real 为 double 求精度**：能量漂移只改善 0.02%，而批量吞吐可能减半（推断）。
-3. **不要把 -ffast-math 写进默认选项**：它假设无 NaN/Inf，而现有契约依赖 NaN 与比较语义可预测。
-4. **不要给单元素 API 套 AVX2 分派**：单元素调用永远被 call 开销主导。
-5. **不要在批量入口落地前手写 intrinsics**：收益会被调用边界吃掉（占 3 倍）。
-6. **不要引入模板表达式或纯 SoA 契约**：摧毁「纯 C 头 + extern "C" + 值语义 + 无分配」的前提，而收益在批量入口、不在模板。
-7. **不要给库加内存池 / arena**：收益上限是一次 malloc 的约 50 ns，风险是所有权 bug 与 C/C++ 混编裂缝。
-8. **不要手写 Quake rsqrt**：rsqrtss + 1 次 NR 严格支配它（1.848e-7 vs 1.750e-3，两次牛顿迭代仍差 25 倍）；两个魔数（0x5f3759df / 0x5f375a86）在 40 万样本上看不到可测差别。
-9. **不要在物理仿真里用近似三角函数而不写明输入域**：参数归约才是 float 的真瓶颈。
-10. **不要把向量库做成「必须批处理才能用」**：标量 API 是调试期与正确性基线的锚点。
+1. **How to fix the `FV_EPS` dimensional bug.** `fv_vec2_project` uses
+   `fv_abs(len_sqr(onto)) <= FV_EPS` to decide "onto is near zero", but `len_sqr` is a **squared
+   quantity**.
+   - The equivalent length threshold is `sqrt(1e-6) = 1e-3`, **1000x looser** than `normalize`'s linear
+     threshold, yet the header comment describes `FV_EPS` as a uniform "close enough to zero" threshold.
+   - This is a real bug B found and I confirmed on review; it is also my own oversight when writing the
+     code.
+   - Options: (a) align with `normalize` (`len_sqr <= FV_EPS*FV_EPS`); (b) split into two constants,
+     `FV_EPS` and `FV_EPS_SQR`; (c) keep it as is and fix the comment. **I lean toward (b)**, which is
+     hardest to get wrong again.
+2. **Whether to introduce `_x4` / `_soa` APIs**: trade API surface for 6–14x. I lean toward "yes, and add
+   only `_x4` and the reduction-style `_soa`", because zero caller changes is the precondition for this
+   library actually being adopted.
+3. **Whether to go `-march=native` / ship prebuilt libraries**: I lean toward "keep the library on a
+   generic x86-64 baseline + target-attribute dispatch for key functions", avoiding "fast on your machine,
+   SIGILL on someone else's".
+4. **Whether to put `-fno-math-errno` into the default compile options**: I lean toward "yes". Zero
+   numerical cost, verifiable, just compare bit for bit.
 
 ---
 
-## 8. 附录
+## 7. What We Explicitly Will Not Do (Three "Not Recommended" Lists Merged)
 
-### 8.1 材料索引
-| 文件 | 内容 |
+| Not recommended | Reason |
 |---|---|
-| docs/research/simd-hardware.md | 参考库解剖、自动向量化条件、intrinsics 工程细节、Zen 2 硬数字、反例清单 |
-| docs/research/algorithm-tricks.md | 逼近与近似、数值稳定性、竞赛套路迁移评估、物理仿真接口需求、劝退清单 |
-| docs/research/layout-memory.md | AoS/SoA/AoSoA 权衡与真实案例、内存层次、批处理 API 三路线对照、分配与生命周期 |
-| docs/research/measured.md | 三档实现 × 三规模实测、逐项分析、复现步骤 |
-| docs/research/raw/ | 原始日志：四组编译选项逐 CASE 输出、带宽探针、反汇编节选、向量化裁决原文、精度对照 |
+| Pad `fv_vec2` to 16 B for SIMD | 8 B fits exactly 4 per ymm, which is optimal on this machine; padded, `_x4` holds only 2 per register and the win is halved |
+| Change `fv_real` to double for accuracy | Energy drift improves by only 0.02%, while batch throughput may halve (inference) |
+| Put `-ffast-math` in the default options | It assumes no NaN/Inf, while the current contract relies on predictable NaN and comparison semantics |
+| Wrap the single-element API in AVX2 dispatch | Single-element calls are always dominated by call overhead |
+| Hand-write intrinsics before batch entry points land | The gain gets eaten by the call boundary, which costs 3x the packing win |
+| Introduce expression templates or a pure SoA contract | It destroys the pure-C-header premise, and the gain is in batch entry points, not in templates |
+| Add a memory pool / arena to the library | The ceiling is about 50 ns of one malloc; the risk is ownership bugs and C/C++ interop cracks |
+| Hand-write Quake rsqrt | `rsqrtss` + 1 NR strictly dominates it, see below |
+| Use approximate trig functions in a physics simulation without stating the input domain | Argument reduction is float's real bottleneck |
+| Make the vector library "batch-only usable" | The scalar API is the anchor for debugging and the correctness baseline |
 
-> 注意：上表这些文件是每次 `make bench` / `make run` **覆盖**写出的，不是不可变存档。引用时必须
-> 连同时刻一起写（文件 mtime 就是那一轮的时刻，header 行有 label/rev）；同一台机器上「可分辨点数」
-> 在四次运行里分别是 90 / 92 / 93 / 107（分母恒为 304），全点中位比 1.0063–1.0079，这些数会随
-> 重跑漂移。需要长期对比的结论请抄进分析文档，不要直接依赖 raw 里的数字。
+Three expanded:
 
-### 8.2 复现命令
+- Expression templates / a pure SoA contract would destroy the premise of "pure C header + `extern "C"` +
+  value semantics + no allocation", and the gain is in batch entry points, not in templates.
+- A memory pool / arena has a ceiling of about 50 ns of one malloc, and the risk is ownership bugs and
+  C/C++ interop cracks.
+- Hand-written Quake rsqrt: `rsqrtss` + 1 NR strictly dominates it, 1.848e-7 vs 1.750e-3, and even after
+  two Newton iterations it is still 25x off.
+  - The two magic numbers `0x5f3759df` / `0x5f375a86` show no measurable difference over 400k samples.
+
+---
+
+## 8. Appendix
+
+### 8.1 Material Index
+
+| File | Content |
+|---|---|
+| `docs/research/simd-hardware.md` | Reference-library dissection, auto-vectorization conditions, intrinsics engineering details, Zen 2 hard numbers, counter-example list |
+| `docs/research/algorithm-tricks.md` | Approximation and approximation methods, numerical stability, assessment of porting competitive-programming tricks, physics-simulation interface needs, not-recommended list |
+| `docs/research/layout-memory.md` | AoS/SoA/AoSoA trade-offs with real cases, memory hierarchy, three batch-API routes compared, allocation and lifetime |
+| `docs/research/measured.md` | Three-tier implementation × three sizes measured, item-by-item analysis, reproduction steps |
+| `docs/research/raw/` | Raw logs: per-CASE output for the four build-option groups, bandwidth probes, disassembly excerpts, verbatim vectorization verdicts, accuracy comparisons |
+
+> Note: the files in the table above are **overwritten** by every `make bench` / `make run`; they are not
+> immutable archives.
+> When citing them, cite the moment too: the file mtime is that round's timestamp, and the header line
+> carries label/rev.
+> On the same machine, the "distinguishable point count" over four runs was 90 / 92 / 93 / 107 (denominator
+> always 304), with an all-point median ratio of 1.0063–1.0079; these numbers drift on every rerun.
+> Conclusions that need long-term comparison should be copied into an analysis document, not taken directly
+> from the numbers in raw.
+
+### 8.2 Reproduction Commands
+
 ~~~bash
-make test          # 单元测试（30 条断言）+ C 兼容性测试
-make bench         # 重跑四组编译选项 × 三档 × 三规模，原始输出写 docs/research/raw/
-make bench-matrix  # 由原始日志生成对比矩阵
-make bench-vec     # GCC 自动向量化报告（-fopt-info-vec-*）
-make bench-checks  # 精度 / 逐位一致（DIFF / IDENT）
-make bench-asm     # 反汇编归档
-sudo sysctl -w kernel.perf_event_paranoid=1 && make bench-perf   # 需要权限；当前 perf 被禁用
+make test          # unit tests (30 assertions) + C compatibility test
+make bench         # rerun four build-option groups × three tiers × three sizes; raw output to docs/research/raw/
+make bench-matrix  # generate the comparison matrix from the raw logs
+make bench-vec     # GCC auto-vectorization report (-fopt-info-vec-*)
+make bench-checks  # accuracy / bit-identical checks (DIFF / IDENT)
+make bench-asm     # disassembly archive
+sudo sysctl -w kernel.perf_event_paranoid=1 && make bench-perf   # requires privileges; perf is currently disabled
 ~~~
 
-### 8.3 我自己的裁决实验
-三条 dot 归约路径（每 8 元素 hadd / 每 8 元素 shuffle / 4 累加器 + 末端归约），**先校验 sum 再计时**：
+### 8.3 My Own Adjudication Experiment
+
+Three dot reduction paths (hadd every 8 elements / shuffle every 8 elements / 4 accumulators + final
+reduction), **verify the sum before timing**:
+
 ~~~bash
 g++ -O3 -march=native -std=c++17 /tmp/haddtest2.cpp -o /tmp/haddtest2 && taskset -c 2 /tmp/haddtest2
-# 参考输入上三条路径均给出 2080.0（正确值）；计时结果见 §3.4
+# all three paths give 2080.0 on the reference input (the correct value); timings are in §3.4
 ~~~
-（源码目前只在会话记录里。要把它收进 bench/ 作为常驻回归，说一声，我加一个 make 目标。）
+
+The source currently exists only in the session record. If you want it checked into `bench/` as a
+permanent regression, tell me and I will add a make target.
 
 ---
 
-*报告完。四份调研笔记里的每条实测都附了原始命令与输出；本报告只对它们做交叉印证、裁决与取舍。*
+*End of report. Every measurement in the four research notes comes with its original command and output;
+this report only cross-confirms, adjudicates, and makes trade-offs among them.*

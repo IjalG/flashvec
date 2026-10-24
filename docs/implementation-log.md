@@ -1,103 +1,193 @@
-# flashvec P0 / P1 落地记录与验收
+# flashvec P0 / P1 Implementation Log and Acceptance
 
-> 对应 `docs/optimization-report.md` 的 §5 改造路线。
-> 这一段记录「实际做了什么、证据是什么、还差什么」，不重复报告里的分析。
+> English | [简体中文](zh-CN/implementation-log.md)
 
-## 1. 交付范围
+> Corresponds to the rework roadmap in §5 of `docs/optimization-report.md`.
+> This log records what was actually done, what the evidence is, and what is still missing. It does not
+> repeat the analysis in the report.
 
-| 阶段 | 内容 | 状态 |
+## 1. Scope of delivery
+
+| Phase | Item | Status |
 |---|---|---|
-| P0 | Makefile 加 `-O3 -fno-math-errno -ffp-contract=off` | 完成 |
-| P0 | `fv_vec2/vec3` 的 `min / max / clamp / madd` | 完成 |
-| P0 | `fv_aabb2` + `fv_aabb2_merge / overlaps` | 完成 |
-| P0 | 修 `FV_EPS` 量纲 bug（新增 `FV_EPS_SQR`，`project` 改用平方阈值） | 完成 |
-| P1 | AoS 4 路交错：`add / sub / scale / lerp / madd` 的 `_x4` | 完成 |
-| P1 | 稀疏变体：`add_x4_mask`、`add_x4_idx`、`scale_x4_idx` | 完成 |
-| P1 | SoA：`add / scale / dot / len / normalize` 的 `_soa` | 完成 |
-| P1 | AVX2 内核 + 运行时派发（非 AVX2 机器走标量回退） | 完成 |
-| 重构 | **批量入口搬进头文件 `static inline`**（默认形态）；库内保留同名 `extern` 符号供 `FV_USE_EXTERN` 与旧消费方 | 完成 |
-| P1+ | NT store（`_stream`）6 个入口 + `_mask_inplace` 1 个 | 完成 |
-| P1+ | `fv_vec4` 类型（标量 18 个）+ `_x2` AoS 批量 5 个 + `_soa` 归约批量 3 个 | 完成 |
-| P1+ | `fv_vec3` 的 SoA 批量 5 个（三维不加 padding、只走 SoA） | 完成 |
-| — | 文档：头文件契约注释、`README.md`、本记录、`docs/acceptance-protocol.md`（验收判据） | 完成 |
+| P0 | Add `-O3 -fno-math-errno -ffp-contract=off` to the Makefile | done |
+| P0 | `min / max / clamp / madd` for `fv_vec2`/`fv_vec3` | done |
+| P0 | `fv_aabb2` + `fv_aabb2_merge / overlaps` | done |
+| P0 | Fix the `FV_EPS` dimensional bug: add `FV_EPS_SQR`, switch `project` to a squared threshold | done |
+| P1 | AoS 4-way interleaving: `_x4` for `add / sub / scale / lerp / madd` | done |
+| P1 | Sparse variants: `add_x4_mask`, `add_x4_idx`, `scale_x4_idx` | done |
+| P1 | SoA: `_soa` for `add / scale / dot / len / normalize` | done |
+| P1 | AVX2 kernels + runtime dispatch; non-AVX2 machines take the scalar fallback | done |
+| Refactor | **Batch entry points moved into the header as `static inline`** (default form); same-name `extern` symbols kept for `FV_USE_EXTERN` and old consumers | done |
+| P1+ | NT store (`_stream`): 6 entry points; `_mask_inplace`: 1 | done |
+| P1+ | `fv_vec4` type (18 scalar functions) + 5 `_x2` AoS batch + 3 `_soa` reduction batch | done |
+| P1+ | 5 SoA batch functions for `fv_vec3` (no padding on the three-component form, SoA only) | done |
+| — | Docs: header contract comments, `README.md`, this log, `docs/acceptance-protocol.md` | done |
 
-文件：`src/flashvec_batch.cpp`（新，批量入口与 AVX2 内核）、`src/flashvec.cpp`（P0 函数 + project 修正）、
-`include/flashvec.h`（新声明 + 契约注释）、`tests/test_p0.cpp`、`tests/test_batch.cpp`、`tests/test_batch_c.c`（新）、
-`Makefile`（编译选项 + 新目标，既有 `all/test/clean` 行为未变）、`verify/`（第三方独立验收）。
+The `docs/acceptance-protocol.md` in the last row is the document that holds the acceptance criteria.
 
-## 2. 验收证据（四路独立，互相印证）
+The changes touch these files:
 
-### 2.1 正确性
+| File | Notes |
+|---|---|
+| `src/flashvec_batch.cpp` | new; batch entry points and AVX2 kernels |
+| `src/flashvec.cpp` | P0 functions + the `project` fix |
+| `include/flashvec.h` | new declarations + contract comments |
+| `tests/test_p0.cpp` | |
+| `tests/test_batch.cpp` | |
+| `tests/test_batch_c.c` | new |
+| `Makefile` | compile flags + new targets; existing `all/test/clean` behavior unchanged |
+| `verify/` | independent third-party acceptance |
 
-| 来源 | 内容 | 结果 |
-|---|---|---|
-| 实现者测试 | `test_flashvec` / `test_p0` / `test_batch` / `test_batch_c` | 30 / 57 / 1098 条断言 + C 批量接口，全 0 失败 |
-| 第三方验收（`verify/parity.cpp`） | 12 个逐元素批量函数，对 `-O2`、`-O3 -march=native`、ASan+UBSan 三档；n = 0..17 全尾长；mask 四种模式；idx 顺序/逆序/重复/乱序；越界写 canary | 12/12 PASS，三档 exit 0，ASan/UBSan 无报告 |
-| 调度者独立复算（不复用上述代码） | 423 条检查：x4 五件套、mask 语义、逆序 idx、SoA add/len/normalize、project 阈值 | 423/423 通过 |
-| 负对照 | 故意把 lerp 内核改成 FMA / 把 mask blend 选反 | 分别 15 处 / 26 处 FAIL —— 证明测试确实能咬人，且 AVX2 内核真的在跑 |
+## 2. Acceptance evidence (four independent lines that corroborate each other)
 
-### 2.2 语义与安全
+### 2.1 Correctness
 
-- **逐位一致**：`add/sub/scale/lerp/madd` 的 `_x4`/`_soa`/`_mask`/`_idx`、`len_soa`、`normalize_soa` 与标量 API 位模式完全相同。
-  实现手段：这些路径只用 `vaddps/vsubps/vmulps/vdivps/vsqrtps`，**不用 FMA、不用 rsqrt/rcp 近似**，归约顺序也一致；
-  库内 `objdump` 普查：`vfmadd` = 0、`rcpps/rsqrtps` = 0、`haddps` = 0。
-- **唯一例外 `dot_soa`**：4 累加器 + 末端一次归约，结果依赖归约顺序。实测：n ≤ 1000 相对误差 ≤ 4e-8；
-  n = 8192 单次点积绝对误差 ≤ 4.8e-7、相对误差 ≤ 6.2e-8；接近抵消时可达 ~3e-6。头文件已按此改写（不再把语料相关值当上界）。
-- **掩码语义**：`mask[i] == 0` 时显式写回 `a[i]` 原值（不是「不写」）。验收含 canary 检查：`_idx` 未引用的位置被改写次数 = 0。
-- **纯 C 可用**：`tests/test_batch_c.c` 与 `tests/test_header_c.c` 用 `cc -std=c11 -pedantic-errors` 编译并运行通过。
-  **注意（重构后口径已变）**：批量入口的实现现在就在头文件里，所以 x86 + GCC/Clang 的纯 C 编译单元
-  **会**展开 `<immintrin.h>`（实测 `cc -std=c11 -E | grep -c immintrin` = 52）。「头文件里没有 intrinsics」
-  这句话只在两种形态下仍成立：`FV_USE_EXTERN`（纯声明，包含集与重构前逐字相同）与
-  `FV_I_NO_INTRINSICS`（纯 C 回退）。`verify/checks.sh` 的 [1][2] 段就是在检查这两种形态。
-- **既有行为未被改动**：旧 30 条断言一字未改；四个构建（旧选项/新源码、新选项、`-march=native`）下既有标量 API 输出位模式哈希相同，
-  唯一变化是 `project` 的阈值修正（|onto| = 1e-4 由错误的「判零」变成正确投影，1e-7 仍判零）。
+| Source | Result |
+|---|---|
+| Implementer's tests | 0 failures |
+| Third-party acceptance (`verify/parity.cpp`) | 12/12 PASS, exit 0 in all three configurations, no ASan/UBSan reports |
+| Dispatcher's independent recount, reusing none of the above code | 423/423 pass |
+| Negative controls | 15 / 26 FAILs respectively |
 
-### 2.3 性能（本机 AMD Ryzen 7 5700U，AVX2/FMA，无 AVX-512）
+What each of the four lines actually tests:
 
-N = 8192（每数组 32 KB，L2 驻留），相对**库调用式标量循环**的加速比（第三方 `verify/perf.cpp`，median of 5，校验和位级相等）：
+- The implementer's tests run `test_flashvec` / `test_p0` / `test_batch` / `test_batch_c`: 30 / 57 / 1098
+  assertions, plus the C batch interface.
+- Third-party acceptance: 12 element-wise batch functions, in three configurations: `-O2`,
+  `-O3 -march=native`, ASan+UBSan.
+- Third-party coverage: every tail length n = 0..17; four mask modes; idx in ascending / descending /
+  duplicated / shuffled order; out-of-bounds write canaries.
+- Dispatcher's independent recount: 423 checks covering the x4 set of five, mask semantics, reversed idx,
+  SoA add/len/normalize, and the `project` threshold.
+- Negative controls: the lerp kernel deliberately rewritten to use FMA, and the mask blend deliberately
+  inverted; these produced 15 / 26 FAILs respectively.
+- Why the negative controls matter: they show the tests really do catch errors, and that the AVX2 kernels
+  really run.
 
-| 运算 | 标量 API | `_x4` | `_soa` |
+### 2.2 Semantics and safety
+
+- **Bit-identical**: the `_x4`/`_soa`/`_mask`/`_idx` variants of `add/sub/scale/lerp/madd`, plus
+  `len_soa` and `normalize_soa`, produce bit patterns identical to the scalar API.
+- How: these paths use only `vaddps/vsubps/vmulps/vdivps/vsqrtps`, **no FMA and no rsqrt/rcp
+  approximation**, and they keep the same reduction order.
+- `objdump` survey of the library: `vfmadd` = 0, `rcpps/rsqrtps` = 0, `haddps` = 0.
+
+- **The one exception, `dot_soa`**: 4 accumulators plus a single reduction at the end, so the result
+  depends on the reduction order.
+- Measured: for n ≤ 1000 the relative error is ≤ 4e-8.
+- For n = 8192 a single dot product has absolute error ≤ 4.8e-7 and relative error ≤ 6.2e-8; with
+  near-cancellation it can reach ~3e-6.
+- The header has been rewritten accordingly: a corpus-dependent value is no longer presented as an upper
+  bound.
+
+- **Mask semantics**: where `mask[i] == 0` the original `a[i]` value is explicitly written back; this is
+  not "leave it unwritten".
+- Acceptance includes a canary check: positions not referenced by `_idx` are rewritten 0 times.
+
+- **Usable from pure C**: `tests/test_batch_c.c` and `tests/test_header_c.c` compile and run under
+  `cc -std=c11 -pedantic-errors`.
+- **Careful: the accounting changed with the refactor.** The batch entry-point implementation now lives in
+  the header itself.
+- So a pure C translation unit on x86 with GCC/Clang **will** expand `<immintrin.h>`; measured
+  `cc -std=c11 -E | grep -c immintrin` = 52.
+- The statement "there are no intrinsics in the header" still holds in only two forms: `FV_USE_EXTERN`
+  (declarations only, with an include set byte-for-byte identical to the pre-refactor one) and
+  `FV_I_NO_INTRINSICS` (the pure C fallback).
+- Sections [1] and [2] of `verify/checks.sh` check exactly those two forms.
+
+- **Existing behavior is untouched**: the original 30 assertions are not edited at all.
+- Across four builds (old flags with new sources, new flags, `-march=native`), the bit-pattern hashes of
+  the existing scalar API outputs are identical.
+- The only change is the `project` threshold fix: |onto| = 1e-4 went from being wrongly judged zero to
+  being projected correctly, while 1e-7 is still judged zero.
+
+### 2.3 Performance (this machine: AMD Ryzen 7 5700U, AVX2/FMA, no AVX-512)
+
+N = 8192, 32 KB per array, L2-resident. The table below gives speedups relative to a **scalar loop that
+calls the library**.
+
+Data from the third-party `verify/perf.cpp`, median of 5 samples, checksums bit-identical.
+
+| Operation | Scalar API | `_x4` | `_soa` |
 |---|---|---|---|
-| add | 2.601 ns/elem | 1.240（2.10x） | 1.369（1.90x） |
-| scale | 2.776 | 1.079（2.57x） | 1.027（2.70x） |
-| lerp | 3.002 | 1.196（2.51x） | — |
-| dot | 3.087 | — | 0.152（**20.33x**） |
-| len | 3.046 | — | 1.149（2.65x） |
-| normalize | 4.382 | — | 1.306（3.35x） |
-| collision 微内核 | 8.481 | — | 1.670（5.08x） |
-| add_mask（50% 命中） | 4.648 | 1.223（3.80x） | — |
-| add_idx（50% 命中） | 2.248 | 1.670（1.35x） | — |
+| add | 2.601 ns/elem | 1.240 (2.10x) | 1.369 (1.90x) |
+| scale | 2.776 | 1.079 (2.57x) | 1.027 (2.70x) |
+| lerp | 3.002 | 1.196 (2.51x) | — |
+| dot | 3.087 | — | 0.152 (**20.33x**) |
+| len | 3.046 | — | 1.149 (2.65x) |
+| normalize | 4.382 | — | 1.306 (3.35x) |
+| collision microkernel | 8.481 | — | 1.670 (5.08x) |
+| add_mask (50% hit) | 4.648 | 1.223 (3.80x) | — |
+| add_idx (50% hit) | 2.248 | 1.670 (1.35x) | — |
 
-N = 1<<20（工作集 24 MB，远超本机单线程可见的 4 MiB L3 —— 芯片总量 8 MiB 由两个 CCX 各 4 MiB
-组成，拐点因此在 1.75×10⁵ 元素而不是 3×10⁵）：`add` 13.977 → `_x4` 9.722（1.44x）/ `_soa` 9.455（1.48x），
-`scale` 反而 0.92–0.93x —— **回到带宽墙，与报告 §2 的预测一致**。
+At N = 1<<20 the working set is 24 MB, far beyond the 4 MiB of L3 visible to a single thread here.
 
-## 3. 必须与数字一起读的三条限定
+The chip total is 8 MiB, two CCX of 4 MiB each, so the knee falls at 1.75×10⁵ elements rather than
+3×10⁵.
 
-1. **收益主要来自「跨 TU 调用边界消失」，不是 intrinsics。** 同一份数学放进头文件内联后，`-O3 -march=native` 的自动向量化
-   几乎追平手写 AVX2（add：`scalar_flat` 2.15x vs `_x4` 2.10x）。但**链接预编译静态库的调用方无法内联**——
-   对他们 `_x4` 的 2.10x 是实打实的；而 `normalize`（3.35x）、`dot`（20.33x）、`collision`（5.08x）是内联标量循环也拿不到的
-   （对应标量档只有 1.13x / 3.02x / 1.36x）。
-2. **规模决定一切**：N = 1<<20 时三档收敛到 0.9–1.5x。报加速比必须同时报工作集大小。
-3. **绝对值跨夹具不可比**：这台笔记本变频（1.64–3.97 GHz）且为共享机，同一份代码跨运行可差 20–25%。
-   三套夹具（实现者 / 第三方 / 调度者）给出的绝对值互不相同（例如 `add_x4` 在 0.35–1.24 ns/elem 之间），
-   只有**同一次运行内的比值**有意义。
+In that range `add` goes 13.977 → `_x4` 9.722 (1.44x) / `_soa` 9.455 (1.48x).
 
-## 4. 明确没做的（以及为什么）
+`scale` instead lands at 0.92–0.93x, back at the memory bandwidth ceiling, as predicted in §2 of the
+report.
 
-- **`_idx` 变体没有 AVX2 内核**：是标量循环，实测只有 1.08–1.35x。原因是 Zen 2 的 `vgatherdps` 约 10 cycle/条（报告 §3.4）。
-  **因此不要把 broad-phase 的收益按 `_mask` 的 1.7–3.8x 来估，要按 1.1–1.35x 估。**
-- **尾巴走标量**（`_x4` 0–3 个、`_soa` 0–7 个），没做掩码加载：尾长没有性能意义。
-- ~~三维批量入口未做~~ → **本轮已做，且走 SoA**：`fv_vec3_add_soa / scale_soa / dot_soa / len_soa /
-  normalize_soa`。`fv_vec3` 是 12 B，装进 ymm 会空转 1/4 lane，所以既不按 AoS 打包、也**不给**
-  `fv_vec3` 加 padding（破坏 ABI）；改为「同一分量的 8 个元素装一条 ymm」。
-- ~~四维向量未做~~ → **本轮已做**：16 B 的 `fv_vec4` 标量 18 个 + `_x2` AoS 批量 5 个（一条 ymm
-  正好装 2 个）+ `_soa` 归约批量 3 个。`_x2` 的数字含义与 `_x4` 一致：一个 256-bit 寄存器装几个元素。
-- **`_fast` 变体（rsqrt + 牛顿迭代）未做**：它改变最后一位，必须作为新函数提供；且实测只快约 10%。
-- **运行时派发只在有 AVX2 的机器上验证过**：强制走标量回退的等价测试通过（把 11 处派发改成 `if (0)` 后 30+57+1098 全绿），
-  但**真实非 AVX2 硬件上未运行过**。这是当前唯一缺少硬件级证据的路径。
+## 3. Three qualifications that must be read together with the numbers
 
-## 5. 复现
+1. **The gain comes mainly from the cross-TU call boundary disappearing, not from intrinsics.**
+   - With the same math inlined from the header, `-O3 -march=native` auto-vectorization nearly matches
+     hand-written AVX2: on add, `scalar_flat` 2.15x vs `_x4` 2.10x.
+   - But **a caller that links a prebuilt static library cannot inline**, and for them the 2.10x of `_x4`
+     is real.
+   - And `normalize` (3.35x), `dot` (20.33x), `collision` (5.08x) are out of reach even for an inlined
+     scalar loop; the scalar path gets only 1.13x / 3.02x / 1.36x respectively.
+
+2. **Size decides everything**: at N = 1<<20 the variants converge to 0.9–1.5x. Quoting a speedup means
+   quoting the working-set size as well.
+
+3. **Absolute values are not comparable across fixtures**: this laptop scales frequency (1.64–3.97 GHz)
+   and is a shared machine, so the same code can differ by 20–25% between runs.
+   - The three fixtures (implementer / third party / dispatcher) give different absolute values; `add_x4`,
+     for example, ranges from 0.35 to 1.24 ns/elem.
+   - Only **ratios within one run** are meaningful.
+
+## 4. What was deliberately not done (and why)
+
+- **The `_idx` variants have no AVX2 kernel**: they are scalar loops, measured at only 1.08–1.35x. The
+  reason is that `vgatherdps` costs about 10 cycles per instruction on Zen 2 (§3.4 of the report).
+
+- **So do not size a broad-phase expectation from the 1.7–3.8x of `_mask`; use 1.1–1.35x.**
+
+- **The tail goes scalar** (`_x4`: 0–3 elements, `_soa`: 0–7), with no masked loads: tail length has no
+  performance meaning.
+
+- ~~Batch entry points for the three-component vectors not done~~ → **done this round, via SoA**:
+  `fv_vec3_add_soa / scale_soa / dot_soa / len_soa / normalize_soa`.
+
+- `fv_vec3` is 12 B, so packing it into a ymm would idle 1/4 of a lane; hence it is neither packed AoS
+  nor is `fv_vec3` given padding (padding would break the ABI).
+
+- For the three-component form the layout is instead "8 elements of the same component in one ymm".
+
+- ~~Four-dimensional vectors not done~~ → **done this round**: a 16 B `fv_vec4` with 18 scalar functions + 5 `_x2` AoS
+  batch + 3 `_soa` reduction batch.
+
+- One ymm of `_x2` holds exactly 2 elements; the number means the same as in `_x4`: how many elements fit
+  in one 256-bit register.
+
+- **The `_fast` variants (rsqrt + Newton iteration) are not implemented**: they change the last bit and
+  must be offered as new functions; and they are measured at only about 10% faster.
+
+- **Runtime dispatch has been verified only on machines with AVX2**: the equivalence test that forces the
+  scalar fallback passes, and turning the 11 dispatch sites into `if (0)` leaves 30+57+1098 all green.
+
+- But it has **never run on real non-AVX2 hardware**. That is currently the only path without
+  hardware-level evidence.
+
+## 5. Reproduction
+
+*(Comments inside the block are the fixture's own and are reproduced verbatim: 条断言 = assertions,
+三档 = three configurations, 纯 C 兼容性 = pure C compatibility, 校验和一致性断言 = checksum-consistency
+assertions, 另一个夹具，看趋势 = a different fixture, look at the trend, 指令普查 = instruction survey.)*
 
 ~~~bash
 make clean && make test-all      # 30 + 57 + 1098 条断言 + 两个 C 兼容性测试
@@ -107,49 +197,95 @@ cd verify && make check          # 结构检查：头文件纯净度、编译选
 cd ../bench && make run          # 三档实现 vs 标量基准（另一个夹具，看趋势）
 ~~~
 
-## 6. 待决策（与报告 §6 的对应关系）
+## 6. Open decisions (mapping to §6 of the report)
 
-| 项 | 现状 |
+| Item | Status |
 |---|---|
-| `FV_EPS` 量纲 | 已按「拆成 `FV_EPS` + `FV_EPS_SQR`」实施（报告 §6 决策 1 的推荐项） |
-| 批量 API 是否引入 | 已引入 `_x4` + `_soa`（报告 §6 决策 2 的推荐项） |
-| `-march=native` | 未引入；默认构建保持 x86-64 基线 + 函数级 `target` 属性派发（决策 3 的推荐项） |
-| `-fno-math-errno` 写进默认 | 已写入（决策 4 的推荐项） |
-| 是否需要 `fv_vec4` / 三维批量 | **已决定并实施**：三维走 SoA（5 个入口），四维走 `_x2`（5 个）+ `_soa`（3 个）+ 标量 18 个 |
-| 是否需要 `_fast` 变体 | 未决——等有真实性能数据（仍未做） |
-| `_stream`（NT store） | 已实施 6 个入口，由调用方显式选择；L2 内实测 **0.13–0.51x**（慢 2–8 倍），只在工作集远超 L3 时划算；L3 之外 PASS 点 1.29–1.58x，上限按入口形状 1.333 / 1.500（`docs/acceptance-protocol.md` §9） |
-| `_mask_inplace` | 已实施 1 个入口（就地稀疏加，掩码外的**值**不变），按掩码密度二选一内核；**全档 INCONCLUSIVE**（相对 `_mask` 无实测吞吐优势，价值在形态 —— 就地写不产生 RFO，省不掉流量） |
+| `FV_EPS` dimension | Implemented as the split into `FV_EPS` + `FV_EPS_SQR` (the recommended option of decision 1, §6 of the report) |
+| Whether to introduce a batch API | Introduced `_x4` + `_soa` (the recommended option of decision 2, §6 of the report) |
+| `-march=native` | Not introduced (the recommended option of decision 3); the default build keeps the x86-64 baseline plus function-level `target` attribute dispatch |
+| `-fno-math-errno` in the defaults | Added (the recommended option of decision 4) |
+| Whether `fv_vec4` / three-component batch are needed | **Decided and implemented**, see below |
+| Whether `_fast` variants are needed | Open, pending real performance data (still not done) |
+| `_stream` (NT store) | 6 entry points implemented, see below |
+| `_mask_inplace` | 1 entry point implemented, see below |
 
-## 7. 重构后的架构事实与验收判据（本轮新增）
+- `fv_vec4` and the three-component batch: the three-component form goes SoA (5 entry points); the
+  four-component form uses `_x2` (5) + `_soa` (3) + 18 scalar functions.
 
-1. **实现的唯一一份在头文件里。** 批量入口（含 AVX2 内核、`target("avx2")` 属性、
-   `__builtin_cpu_supports("avx2") != 0` 派发）现在是 `include/flashvec.h` 里的 `static inline`。
-   实测计数：头文件里 32 处派发点、7 处 `target(`；`src/*.cpp` 里**各 0 处**。
-   `src/flashvec_batch.cpp` 只剩 33 个 `extern` 转发符号（二进制兼容用）。
-   为什么这么改：跨 TU 调用边界是一阶瓶颈（§3 第 1 条的实测），而链接预编译静态库的调用方
-   无法把这层边界消掉。
-2. **三种形态必须给同一个结果**：默认（头文件 inline）、`FV_USE_EXTERN`（库内实现）、
-   `FV_I_NO_INTRINSICS` / 纯 C 回退。`make test-inline` / `test-vec34-inline` 直接对拍主输出流。
-3. **头文件现在条件包含 `<immintrin.h>`**（`FV_I_INTRINSICS && !FV_USE_EXTERN`），并且对可能被
-   收缩成 FMA 的入口加了 `#pragma GCC optimize("fp-contract=off")`：`target("avx2")` 挡不住
-   调用方命令行带来的 `-mfma`（实测 `-march=native -mfma -ffp-contract=fast` 下照样出现 `vfmadd`）。
-   `verify/checks.sh` 的 [8] 段就是在这最狠的一档下做产物级指令普查（7 项禁用助记符 = 0，
-   `vmovntps` > 0 作为 NT store 正对照）。
-4. **验收判据已经独立成文**：见 `docs/acceptance-protocol.md`。一条优化被接受必须**同时**满足
-   位级对拍 / 目标规模同进程中位比 ≥ 1.15x / 同向复现 / 增益超过该点 A/A 地板 / 其他规模不回退
-   超过 5%。其中「单点比值不可信」这条有硬证据：304 个大 N 测量点里可分辨的只有约
-   30–35%（四次运行分别为 90 / 92 / 93 / 107，分母恒为 304）—— 这个数随运行漂移，引用请带轮次。
-   写成区间不削弱这条证据，反而是它更硬的地方：同一台机器、同一份代码，「有多少点可分辨」
-   本身就在 90→107 之间漂，那「某个 (op, n) 的单点比值」当然更不可复现。
-5. **归约型入口不具备分段不变性**（本轮新增的契约事实，必须一起读）：`fv_vec2_dot_soa` /
-   `fv_vec3_dot_soa` / `fv_vec4_dot_soa` 把同一数组切成多段分别调用再相加，结果与整段一次调用
-   **不同** —— 实测 n=1000 相对差 ≈3.9e-6、n=8192 ≈2.4e-5，12/12 组语料全部不一致；
-   同一次实验里 `fv_vec2_add_x4` 的 12/12 组**逐位一致**（对照组，证明实验有效）。
-   这是归约树随切分改变的**设计必然**，不是缺陷；但它与「与标量路径的误差 ≤ 4e-8」是两件事，
-   两句话不能混用。需要「结果与切分无关」的调用方请用标量 `fv_vec2_dot` 顺序累加，或固定切分方式。
-   逐元素型批量入口（`add/sub/scale/lerp/madd/len/normalize` 及其 `_x4`/`_soa`/`_mask`/`_idx` 变体）
-   具备分段不变性。
-6. **缓存口径已更正**：本机 L3 是 **4 MiB/CCX × 2 CCX = 8 MiB 芯片总量，单线程可见 4 MiB**
-   （`/sys/.../index3`：`size=4096K shared_cpu_list=0-7`）。旧文档写「L3 8 MiB 共享」并据此把拐点
-   算成 `3×10⁵` 元素，是错的 —— 真实拐点约 **1.75×10⁵** 元素（@24 B/元素），实测断崖落在
-   2^17（38–57 GB/s）与 2^18（5.6–8.8 GB/s）之间。
+- `_stream`: 6 entry points implemented, chosen explicitly by the caller.
+
+- `_stream` readings: measured inside L2 at **0.13–0.51x**, i.e. 2–8× slower; it pays off only when the
+  working set far exceeds L3.
+
+- `_stream` ceiling: PASS points beyond L3 at 1.29–1.58x, with ceilings of 1.333 / 1.500 set by the
+  entry-point shape (`docs/acceptance-protocol.md` §9).
+
+- `_mask_inplace`: 1 entry point implemented; a sparse in-place add that leaves **values** outside the
+  mask unchanged, with the kernel chosen from the mask density.
+
+- `_mask_inplace` verdict: **INCONCLUSIVE in every configuration**; no measured throughput advantage over
+  `_mask`.
+
+- Its value is in the form: an in-place write produces no RFO but saves no traffic.
+
+## 7. Post-refactor architecture facts and acceptance criteria (added this round)
+
+1. **There is exactly one copy of the implementation, and it is in the header.**
+   - Batch entry points are now `static inline` in `include/flashvec.h`.
+   - That header holds the AVX2 kernels, the `target("avx2")` attribute, and the
+     `__builtin_cpu_supports("avx2") != 0` dispatch.
+   - Measured counts: 32 dispatch sites and 7 `target(` in the header; **0 of each** in `src/*.cpp`.
+   - `src/flashvec_batch.cpp` is left with 33 `extern` forwarding symbols, for binary compatibility.
+   - Why this change: the cross-TU call boundary is a first-order bottleneck (measured in item 1 of §3),
+     and a caller linking a prebuilt static library cannot remove that boundary.
+
+2. **The three forms must give the same result**: default (header inline), `FV_USE_EXTERN` (implemented
+   in the library), and `FV_I_NO_INTRINSICS` / pure C fallback.
+   - `make test-inline` / `test-vec34-inline` compare the main output streams directly.
+
+3. **The header now conditionally includes `<immintrin.h>`**, guarded by
+   `FV_I_INTRINSICS && !FV_USE_EXTERN`.
+   - Entry points that could be contracted into FMA carry `#pragma GCC optimize("fp-contract=off")`.
+   - `target("avx2")` does not stop a `-mfma` coming from the caller's command line: under
+     `-march=native -mfma -ffp-contract=fast`, `vfmadd` still appears.
+   - Section [8] of `verify/checks.sh` runs an artifact-level instruction survey under the strictest
+     configuration: 7 forbidden mnemonics = 0, and `vmovntps` > 0 as the positive control for NT stores.
+
+4. **The acceptance criteria are now a document of their own**: see `docs/acceptance-protocol.md`.
+   - An optimization is accepted only if it satisfies five conditions **simultaneously**:
+     - Bit-level comparison.
+     - Same-process median ratio at the target size ≥ 1.15x.
+     - Same-direction reproduction.
+     - Gain above the A/A floor at that point.
+     - No other size regresses by more than 5%.
+   - "A single-point ratio is not trustworthy" has hard evidence: of 304 large-N measurement points,
+     only about 30–35% are resolvable.
+   - Across four runs the resolvable counts were 90 / 92 / 93 / 107, always out of 304. The count drifts
+     between runs, so cite it together with the round.
+   - Writing it as a range does not weaken that evidence; it is where the evidence is strongest: on the
+     same machine with the same code, how many points are resolvable itself drifts between 90→107.
+   - A single-point ratio for one `(op, n)` is then, of course, even less reproducible.
+
+5. **Reduction-type entry points are not split invariant**; this is a contract fact added this round and
+   must be read together with the rest.
+   - `fv_vec2_dot_soa` / `fv_vec3_dot_soa` / `fv_vec4_dot_soa`: split the same array into several
+     segments, call each one, add the results, and the result is **different** from one call over the
+     whole array.
+   - Measured: relative difference ≈3.9e-6 at n=1000 and ≈2.4e-5 at n=8192; all 12/12 corpora disagree.
+   - In the same experiment `fv_vec2_add_x4` is **bit-identical** in all 12/12 corpora; that is the
+     control group showing the experiment works.
+   - This is a **design consequence** of the reduction tree changing with the split, not a defect. But it
+     is a different statement from "error against the scalar path ≤ 4e-8"; the two must not be mixed.
+   - Callers who need split-independent results should use the scalar `fv_vec2_dot` with sequential
+     accumulation, or fix the split.
+   - Element-wise batch entry points (`add/sub/scale/lerp/madd/len/normalize` and their
+     `_x4`/`_soa`/`_mask`/`_idx` variants) are split invariant.
+
+6. **The cache accounting has been corrected.**
+   - L3 here is **4 MiB/CCX × 2 CCX = 8 MiB chip total, with 4 MiB visible to a single thread**, read
+     from `/sys/.../index3`: `size=4096K shared_cpu_list=0-7`.
+   - The old document said "L3 8 MiB shared" and computed the knee as `3×10⁵` elements from that; that
+     was wrong.
+   - The real knee is about **1.75×10⁵** elements (@24 B/element), and the measured cliff falls between
+     2^17 (38–57 GB/s) and 2^18 (5.6–8.8 GB/s).
