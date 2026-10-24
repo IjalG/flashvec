@@ -378,6 +378,48 @@ evidence.
 
    Re-checked with `make test-header` / `make test-inline` / `bash verify/checks.sh`: 11 rules, FAIL=0.
 
+7. **`-ffast-math` buys nothing, costs accuracy, and makes one entry point measurably slower.**
+
+   The library is already at the hardware limit for its workloads, so there is nothing left for fast-math to
+   exploit. Measured here with two shared objects loaded side by side into one process and run alternately,
+   median of 7, 5 entry points × 4 sizes:
+
+   | Entry point | size | default | `-ffast-math` | ratio |
+   |---|---|---|---|---|
+   | `add_x4`, `scale_x4`, `dot_soa`, `len_soa` | all | — | — | 1.00 ± 0.05, i.e. noise |
+   | `normalize_soa` | 8192 | 0.35 ns/e | 0.42 ns/e | **0.83–0.85x**, stable over four runs |
+   | every entry point | 8M | — | — | ≈1.00, DRAM-bound |
+
+   The instruction census explains it. fast-math replaces every `vdivps` with `vrcpps` plus a Newton step:
+
+       default       vdivps=5  vrcpps=0  vrsqrtps=0
+       -ffast-math   vdivps=0  vrcpps=5  vrsqrtps=2
+       both          vfmadd=0                    (the pragma still holds)
+
+   `normalize` runs 8 independent lanes, so `vdivps` throughput is already pipelined away. Trading one divide
+   for three or four instructions spends issue slots without shortening the dependency chain.
+
+   Accuracy, on 2^20 random vectors:
+
+   | Entry point | elements with a different bit pattern | max relative error |
+   |---|---|---|
+   | `len_soa` | 0 / 1048576 | 0 |
+   | `normalize_soa` | 340525 / 1048576 (32.5%) | 2.8e-7 |
+   | `dot_soa` | — | 1.1e-7 |
+
+   Reproduction:
+
+       c++ -std=c++17 -O3 -fno-math-errno -ffp-contract=off -fPIC -shared -Iinclude \
+           src/flashvec.cpp src/flashvec_batch.cpp src/flashvec_vec4.cpp -o /tmp/libbase.so
+       c++ -std=c++17 -O3 -ffast-math               -fPIC -shared -Iinclude \
+           src/flashvec.cpp src/flashvec_batch.cpp src/flashvec_vec4.cpp -o /tmp/libfast.so
+       objdump -d /tmp/libbase.so | grep -c vrcpps   # 0
+       objdump -d /tmp/libfast.so | grep -c vrcpps   # 5
+
+   Then `dlopen` both and time the same entry point alternately. This is the exact scenario a consumer hits:
+   because the batch entry points are `static inline`, defining `-ffast-math` compiles the header's
+   implementation under it.
+
 **How to use this**: if a new proposal is structurally the same as one of the items above, first say which layer's
 assumption changed — byte accounting, microarchitecture, or semantics. If you cannot say, go back to the five criteria
 in §0 and work the "build the harness first, then touch code" way.

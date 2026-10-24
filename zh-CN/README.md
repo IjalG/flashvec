@@ -216,6 +216,7 @@ make test-refactor           # 以上全部 + 导出符号清单 + 反汇编普�
 头文件里另有 `#pragma GCC optimize("fp-contract=off")` 作为第二道保险。
 
 不使用 `-march=native`、`-mavx2`、`-ffast-math`。默认产物保持 x86-64 基线。
+`-ffast-math` 不只是不必要：实测它在任何入口上都没有加速，还让 `normalize_soa` 在 L1/L2 规模上慢 15–17%，并改变 32.5% 的输出位模式。见 `docs/zh-CN/acceptance-protocol.md` §9 第 7 条。
 AVX2 只在头文件里用函数级 `target("avx2")` 属性加运行时 `__builtin_cpu_supports` 派发启用。
 非 AVX2 机器与所有尾长都走标量路径，结果相同。
 

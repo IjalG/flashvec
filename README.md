@@ -260,7 +260,9 @@ expression differ by 1 ulp across translation units or targets. The header adds 
 optimize("fp-contract=off")` as a second line of defence.
 
 `-march=native`, `-mavx2` and `-ffast-math` are not used. The default build stays on the x86-64
-baseline. AVX2 is enabled only inside the header, through function-level `target("avx2")` attributes
+baseline. `-ffast-math` is not merely unnecessary: measured, it gives no speedup anywhere, makes
+`normalize_soa` 15–17% slower at L1/L2 sizes, and changes 32.5% of output bit patterns. See
+`docs/acceptance-protocol.md` §9 item 7. AVX2 is enabled only inside the header, through function-level `target("avx2")` attributes
 plus runtime dispatch on `__builtin_cpu_supports`. Machines without AVX2, and every tail, take the
 scalar path with identical results.
 

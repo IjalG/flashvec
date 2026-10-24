@@ -281,6 +281,43 @@ GB/s 用**名义**字节（读 + 写）算会把 `_stream` 的 NT store 收益�
 
    复核 `make test-header` / `make test-inline` / `bash verify/checks.sh`，11 条规则 FAIL=0。
 
+7. **`-ffast-math` 拿不到任何收益，反而损失精度，并让一个入口变慢。**
+
+   这个库在它的负载上已经贴着硬件极限，fast-math 没有可压榨的东西。实测方式：两个共享库同时加载进一个进程、交替计时，取 7 次中位数，5 个入口 × 4 档规模：
+
+   | 入口 | 规模 | 默认 | `-ffast-math` | 比值 |
+   |---|---|---|---|---|
+   | `add_x4`、`scale_x4`、`dot_soa`、`len_soa` | 全部 | — | — | 1.00 ± 0.05，即噪声 |
+   | `normalize_soa` | 8192 | 0.35 ns/元素 | 0.42 ns/元素 | **0.83–0.85x**，四轮稳定复现 |
+   | 所有入口 | 8M | — | — | ≈1.00，受 DRAM 带宽限制 |
+
+   原因在指令普查里。fast-math 把每一条 `vdivps` 换成 `vrcpps` 加一步牛顿迭代：
+
+       default       vdivps=5  vrcpps=0  vrsqrtps=0
+       -ffast-math   vdivps=0  vrcpps=5  vrsqrtps=2
+       两者          vfmadd=0                    （pragma 那道防线仍然有效）
+
+   `normalize` 的 8 条 lane 互相独立，`vdivps` 的吞吐早就在流水线里摊平了。用三到四条指令换一条除法，只多占发射槽，不缩短依赖链。
+
+   精度，2^20 个随机向量：
+
+   | 入口 | 位模式不同的元素 | 最大相对误差 |
+   |---|---|---|
+   | `len_soa` | 0 / 1048576 | 0 |
+   | `normalize_soa` | 340525 / 1048576（32.5%） | 2.8e-7 |
+   | `dot_soa` | — | 1.1e-7 |
+
+   复现：
+
+       c++ -std=c++17 -O3 -fno-math-errno -ffp-contract=off -fPIC -shared -Iinclude \
+           src/flashvec.cpp src/flashvec_batch.cpp src/flashvec_vec4.cpp -o /tmp/libbase.so
+       c++ -std=c++17 -O3 -ffast-math               -fPIC -shared -Iinclude \
+           src/flashvec.cpp src/flashvec_batch.cpp src/flashvec_vec4.cpp -o /tmp/libfast.so
+       objdump -d /tmp/libbase.so | grep -c vrcpps   # 0
+       objdump -d /tmp/libfast.so | grep -c vrcpps   # 5
+
+   然后用 `dlopen` 同时加载两者、交替计时。这正是消费者会遇到的场景：批量入口是 `static inline`，定义 `-ffast-math` 就是把它用在头文件的实现上。
+
 **用法**：如果新方案与上面某条同构，先说明「流量账 / 微架构 / 语义」哪一层的假设变了。说不出来就回到 §0 的五条判据，按「先建夹具、再动手」的路子做。
 `bench/ab` 里的这条负结果（§1）就是夹具先行抓出来的。
 
