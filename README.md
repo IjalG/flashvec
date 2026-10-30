@@ -35,6 +35,8 @@ implementation, so nothing needs to be linked. To use the prebuilt library inste
 | `fv_vec3` | 12 B | No padding, so existing layouts stay valid |
 | `fv_vec4` | 16 B | Size locked by `static_assert` |
 | `fv_aabb2` | 16 B | Axis-aligned bounding box |
+| `fv_quat` | 16 B | Rotation; identity (0,0,0,1); same layout as `fv_vec4`, but a distinct type |
+| `fv_mat3` | 36 B | Row-major 3x3; the same convention as `fv_mat4`, the opposite of GLM |
 
 ## Scalar API
 
@@ -56,6 +58,9 @@ header.
 52 vector entry points, grouped by memory layout, plus 4 matrix transform entry points. The
 number in a name is how many elements fit in one 256-bit register: four `fv_vec2` (`_x4`) or
 two `fv_vec4` (`_x2`). Both fill the register completely, so no lane is wasted.
+
+The P6 physics group adds four SoA entries on top of that: quaternion multiply, normalize and
+rotate-vector, plus the 3x3 transform. They are documented under [Physics primitives](#physics-primitives).
 
 19 of the 52 are `_stream` variants of an operation already in the list, differing only in the
 store instruction; see [Streaming stores](#streaming-stores).
@@ -150,6 +155,68 @@ store is **0.13–0.37**. Beyond L3 the same round measures **1.48–1.60x**.
 
 The library will never switch to them on its own; the choice belongs to the caller.
 
+## Physics primitives
+
+The first domain types on top of the vector layer: rotation (`fv_quat`) and 3x3 linear algebra
+(`fv_mat3`). They are a separate group because a quaternion is not a `fv_vec4` -- its product is a
+non-commutative composition, its zero is not a rotation, and its batch form needs four component
+arrays rather than the vector layout.
+
+### Types
+
+| Type | Size | Notes |
+|---|---|---|
+| `fv_quat` | 16 B | `x, y, z, w`; identity `(0,0,0,1)`; deliberately layout-compatible with `fv_vec4`, but a distinct type |
+| `fv_mat3` | 36 B | Row-major `m[row*3+col]`; the same convention as `fv_mat4` (the opposite of GLM/OpenGL); compact 9-float layout, no padding |
+
+A **unit** quaternion `q = (x,y,z,w)` rotates `v` by `v' = q (v,0) q*`. `fv_quat_mul(a,b)` is the
+Hamilton product `a*b`, so it applies `b` first and `a` second; `fv_mat3_mul(a,b)` has the same
+composition order. `fv_quat_rotate_vec3` and `fv_mat3_from_quat` assume a unit quaternion and do not
+normalize. `fv_quat_normalize` maps length <= `FV_EPS` to the identity -- the one deliberate difference
+from `fv_vec*_normalize`, which returns the zero vector: a zero quaternion is not a rotation.
+
+### Scalar and batch API
+
+Scalar: `fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / mul /
+rotate_vec3`; `fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat`.
+
+Batch (SoA, 8 elements per 256-bit register; a quaternion is four arrays, a 3x3 is nine):
+
+- `fv_quat_mul_soa` -- 4 + 4 input arrays, 4 outputs, `n`
+- `fv_quat_normalize_soa` -- 4 input arrays, 4 outputs, `n`
+- `fv_quat_rotate_vec3_soa` -- 4 quaternion + 3 vector inputs, 3 outputs, `n`
+- `fv_mat3_transform_vec3_soa` -- 9 matrix + 3 vector inputs, 3 outputs, `n`
+
+All four are **bit-identical** to their per-value counterparts for every `n` and every tail length,
+inside the same `fp-contract=off` pragma: `make test-physics-fma` builds the consumer with
+`-march=native -mfma -ffp-contract=fast` and the batch output still matches the scalar one
+(`vfmadd = 0`). The usual NaN-payload exception applies; see the guarantees section.
+
+Implementation note: quaternion multiply, rotate-vector and mat3 transform are **plain C** inside a
+`target("avx2")` function -- GCC vectorizes them at 256 bits with zero shuffles (measured 40 / 40 / 21
+AVX2 instructions including loads and stores, 0 `vpermps`/`vshufps`). Quaternion normalize was the one
+loop the compiler refused to vectorize (it kept `sqrtss`/`divss` and a branch), so it has an explicit
+AVX2 kernel with a blend to the identity. No hand-written intrinsic is used anywhere else; the rule is
+the same as the rest of the library: hand-write only after the compiler fails.
+
+### Preliminary measurements
+
+`make bench-physics`, same-process interleaved A/B, 11 paired rounds, `taskset -c 0`, medians of two
+runs. Baseline is the per-element library call (cross-TU, not inlinable). The same-round A/A floor was
+0.99-1.00 at n=8192 and 0.93-1.07 at n=1M.
+
+| Entry | n = 8192 (L2) | n = 1M (32-60 MiB working set) |
+|---|---|---|
+| `fv_quat_mul_soa` | 18.0-19.5x | 2.39-2.51x |
+| `fv_quat_normalize_soa` | 41.9-42.3x | 4.56-5.13x |
+| `fv_quat_rotate_vec3_soa` | 25.8x | 3.39-3.57x |
+| `fv_mat3_transform_vec3_soa` | 24.7-25.1x | 3.33-3.80x |
+
+At n=8192 the batch entries run at 0.4-0.55 ns/element against 8-20 ns for the scalar calls; most of
+the gain is the removed call boundary, exactly as the library's measured thesis predicts. At n=1M the
+working set is DRAM-bound and the ratios collapse toward the memory ceiling. These are preliminary,
+not the five-criterion acceptance of `docs/acceptance-protocol.md`; quote them with the harness.
+
 ## Guarantees
 
 ### Bit-for-bit identical
@@ -162,6 +229,8 @@ The following entry points are guaranteed to match the corresponding scalar API 
 - `normalize_soa`
 - the fused pipeline `madd_normalize_soa` against `scale_soa` then `add_soa` then `normalize_soa`
 - `addmul` and `maddv` against their per-value counterparts
+- `fv_quat_mul_soa` / `fv_quat_normalize_soa` / `fv_quat_rotate_vec3_soa` against the per-value quaternion API
+- `fv_mat3_transform_vec3_soa` against `fv_mat3_transform_vec3`
 - every `_stream` function against its non-stream counterpart
 
 The implementation uses only `vaddps`, `vsubps`, `vmulps`, `vdivps` and `vsqrtps`. No FMA, no
@@ -386,6 +455,11 @@ make test-inline             # default form vs FV_USE_EXTERN form, byte for byte
 make test-fma                # still bit-identical for a -march=native -mfma consumer
 make test-inline-effects     # survey of what inlines and what does not
 make test-stream             # regression for _stream and _mask_inplace
+make test-physics            # quat + mat3, all forms (C/C++ inline/extern/pure-C/FMA)
+make test-quat               # quaternion scalar semantics + SoA batch, bit-identical
+make test-mat3               # 3x3 scalar semantics + SoA batch, bit-identical
+make test-physics-c          # the same contract from a plain C11 translation unit
+make bench-physics           # per-element calls vs SoA batch, same-process A/B
 make test-vec4               # 4D scalar and batch
 make test-vec34-inline       # 3D/4D batch shape comparison
 make test-refactor           # all of the above plus symbol list and disassembly survey
@@ -446,11 +520,14 @@ effects` pins this contract down as a reproducible assertion.
   semantics.
 - Approximate trigonometry. An `atan` polynomial runs about 2.7x faster than glibc, but the input
   domain has to be documented.
-- Matrices, quaternions, angles and rotations.
+- Quaternion interpolation (slerp / shortest-arc lerp), axis-angle and Euler construction. They need
+  sin/cos and an input-domain contract, which is a separate design decision.
+- Full `fv_mat4` operations (multiply / inverse), quaternion-from-matrix, and a batch `fv_mat3_mul`.
 - Absolute speedup measurements for the 3D and 4D batch entries.
 
 Already done, though an earlier version of this file listed them as future work: 3D batch entry
-points via SoA, and `fv_vec4` with `_x2` AoS and `_soa` reduction batches.
+points via SoA, `fv_vec4` with `_x2` AoS and `_soa` reduction batches, and the `fv_quat` / `fv_mat3`
+physics primitives above.
 
 ## Documentation
 

@@ -22,6 +22,10 @@
 | P1+ | NT store (`_stream`): 6 entry points; `_mask_inplace`: 1 | done |
 | P1+ | `fv_vec4` type (18 scalar functions) + 5 `_x2` AoS batch + 3 `_soa` reduction batch | done |
 | P1+ | 5 SoA batch functions for `fv_vec3` (no padding on the three-component form, SoA only) | done |
+| P6 | `fv_quat` + `fv_mat3` scalar API (rotation / 3x3) | done |
+| P6 | SoA batch: quat multiply / normalize / rotate-vector, mat3 transform | done |
+| P6 | Tests: C/C++ x inline/extern/pure-C + FMA consumer, batch bit-identical to per-value | done |
+| P6 | Preliminary A/B measurement (`make bench-physics`) | done (preliminary, not five-criterion acceptance) |
 | — | Docs: header contract comments, `README.md`, this log, `docs/acceptance-protocol.md` | done |
 
 The `docs/acceptance-protocol.md` in the last row is the document that holds the acceptance criteria.
@@ -289,3 +293,79 @@ cd ../bench && make run          # 三档实现 vs 标量基准（另一个夹�
      was wrong.
    - The real knee is about **1.75×10⁵** elements (@24 B/element), and the measured cliff falls between
      2^17 (38–57 GB/s) and 2^18 (5.6–8.8 GB/s).
+
+## 8. P6: quaternion / mat3 physics primitives (added this round)
+
+### 8.1 What landed
+
+| Item | Status |
+|---|---|
+| `fv_quat` (16 B, x/y/z/w, identity (0,0,0,1)) + `fv_mat3` (36 B, row-major) | done |
+| Scalar quat API: `make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / mul / rotate_vec3` | done |
+| Scalar mat3 API: `from_rows / transform_vec3 / mul / transpose / from_quat` | done |
+| SoA batch: `fv_quat_mul_soa`, `fv_quat_normalize_soa`, `fv_quat_rotate_vec3_soa`, `fv_mat3_transform_vec3_soa` | done |
+| Tests: C++ scalar + batch parity, C11 inline / `FV_USE_EXTERN` / pure-C, FMA consumer | done |
+| Preliminary A/B measurement (`make bench-physics`) | done (preliminary) |
+
+New files: `src/flashvec_quat.cpp`, `src/flashvec_mat3.cpp`, `src/flashvec_physics_batch.cpp`,
+`tests/test_quat.cpp`, `tests/test_mat3.cpp`, `tests/test_physics_c.c`, `tests/bench_physics.cpp`.
+Edits: `include/flashvec.h` (types, scalar declarations, batch declarations, implementation, public
+wrappers), `Makefile` (objects, test/bench targets), `README.md` (this group), this log.
+
+### 8.2 Contract decisions (why these, not other choices)
+
+- **Quaternion normalize maps length <= FV_EPS to the identity (0,0,0,1)**, not to zero: a zero
+  quaternion is not a rotation. This is the one deliberate difference from `fv_vec*_normalize`; the
+  header states it and `tests/test_quat.cpp` pins it.
+- **Unit precondition**: `fv_quat_rotate_vec3` and `fv_mat3_from_quat` assume |q| = 1 and do not
+  normalize -- the same rule as a rotation matrix assuming an orthonormal basis. Normalization is a
+  separate, explicit call.
+- **Composition order**: `fv_quat_mul(a, b)` = a*b applies b first and a second; `fv_mat3_mul(a, b)`
+  uses the same order, and `fv_quat_mul(q, conjugate(q))` is the identity for unit q.
+- **mat3 layout**: 36 B, row-major, compact 9 floats, no padding. Padding to 48/64 B is a caller-side
+  AoS choice; the library's batch form is SoA and does not need a padded struct. The row-major
+  convention is the same as `fv_mat4` (and the opposite of GLM).
+- **No slerp / axis-angle / Euler this round**: they need sin/cos and an input-domain contract, which
+  is a separate design decision (see section 4).
+
+### 8.3 Evidence
+
+| Source | Result |
+|---|---|
+| `make test-quat` | 24,311 checks, 0 failures: scalar semantics + batch bit-parity, n = 0..40 (every tail) + 63 / 1024 / 4097 |
+| `make test-mat3` | 8,162 checks, 0 failures: same coverage for the 3x3 API |
+| `make test-physics-c` | 3,904 checks, 0 failures; the same source also passes under `-DFV_USE_EXTERN` and `-DFV_I_NO_INTRINSICS` |
+| `make test-physics-fma` | both C++ tests pass under `-march=native -mfma -ffp-contract=fast`; `vfmadd` = 0 in both consumer objects |
+| Vectorization census | quat mul 40, rotate 40, mat3 21 AVX2 instructions including loads/stores, 0 `vpermps`/`vshufps`; normalize 29 (explicit kernel) |
+| `make test-all` | green; `test-physics` is appended to the target list |
+
+The AVX2 census is `objdump` of `build/flashvec_physics_batch.o` at the default tier; the FMA census
+compiles the same source with `-march=native -mfma -ffp-contract=fast` and counts `vfmadd` in each
+kernel (0 in all four). The batch-vs-scalar comparison is `memcmp`/bit equality, not a tolerance.
+
+### 8.4 Preliminary performance
+
+`make bench-physics`: same-process interleaved A/B, 11 paired rounds, `taskset -c 0`, medians of two
+runs. The same-round A/A floor was 0.99-1.00 at n=8192 and 0.93-1.07 at n=1M.
+
+| Entry | n = 8192 (L2) | n = 1M (32-60 MiB working set) |
+|---|---|---|
+| `fv_quat_mul_soa` | 18.0-19.5x | 2.39-2.51x |
+| `fv_quat_normalize_soa` | 41.9-42.3x | 4.56-5.13x |
+| `fv_quat_rotate_vec3_soa` | 25.8x | 3.39-3.57x |
+| `fv_mat3_transform_vec3_soa` | 24.7-25.1x | 3.33-3.80x |
+
+Baseline: per-element library calls (cross-TU, not inlinable). At 8192 the batch runs at
+0.4-0.55 ns/element against 8-20 ns for the scalar calls; the removed call boundary is most of the
+gain, consistent with the rest of the library. These numbers are **preliminary**: the five-criterion
+acceptance of `docs/acceptance-protocol.md` has not been run for P6. Quote them with the harness and
+the run.
+
+### 8.5 What remains
+
+- Quaternion interpolation (slerp / shortest-arc lerp), axis-angle and Euler construction (sin/cos +
+  domain contract).
+- Full `fv_mat4` operations (multiply / inverse), quaternion-from-matrix, batch `fv_mat3_mul`.
+- Absolute speedup for the 3D/4D entries (still unmeasured).
+- A hardened P6 A/B fixture under the five acceptance criteria; `bench-physics` is a preliminary
+  harness, not the acceptance one.

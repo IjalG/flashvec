@@ -19,7 +19,8 @@ CPPFLAGS ?= -Iinclude
 
 BUILD := build
 LIB   := $(BUILD)/libflashvec.a
-OBJ   := $(BUILD)/flashvec.o $(BUILD)/flashvec_batch.o $(BUILD)/flashvec_vec4.o
+OBJ   := $(BUILD)/flashvec.o $(BUILD)/flashvec_batch.o $(BUILD)/flashvec_vec4.o \
+         $(BUILD)/flashvec_quat.o $(BUILD)/flashvec_mat3.o $(BUILD)/flashvec_physics_batch.o
 
 .PHONY: all test clean
 
@@ -108,7 +109,8 @@ test-batch: $(BUILD)/test_batch $(BUILD)/test_batch_c
 test-all: test test-p0 test-batch test-mat4 test-mat4-c test-mat4-inline test-mat4-fma \
           test-maddnorm test-maddnorm-c test-maddnorm-inline test-maddnorm-fma \
           test-addmul test-addmul-c test-addmul-inline test-addmul-fma \
-          test-stream test-stream-parity test-stream-parity-fma
+          test-stream test-stream-parity test-stream-parity-fma \
+          test-physics
 
 # ------------- Acceptance targets for the header-inline form (P1 refactor): append-only; not one command of the targets above was changed -------------
 #   make test-header          strict compile profile (C11 -pedantic-errors / C++17 -Wpedantic); double inclusion in one TU;
@@ -632,3 +634,97 @@ $(BUILD)/bench_addmul: tests/bench_addmul.cpp $(LIB) include/flashvec.h | $(BUIL
 
 bench-addmul: $(BUILD)/bench_addmul
 	./$(BUILD)/bench_addmul
+
+# ==================== P6: quaternion / mat3 physics primitives ====================
+# Append-only: not one command of any existing target above was changed.
+#   test-quat        C++ main test: quat semantics + bit-identical SoA batch (n = 0..40 all tails + 63/1024/4097)
+#   test-mat3        C++ main test: mat3 semantics + bit-identical SoA batch (same tail coverage)
+#   test-physics-c   plain C11 caller: scalar API links, batch entries compile and are bit-identical
+#   test-physics     all of the above forms (this is what test-all depends on)
+#   bench-physics    scalar-per-element vs SoA batch, same-process A/B, 11 paired rounds + A/A control
+.PHONY: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma test-physics bench-physics
+
+$(BUILD)/flashvec_quat.o: src/flashvec_quat.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/flashvec_mat3.o: src/flashvec_mat3.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/flashvec_physics_batch.o: src/flashvec_physics_batch.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/test_quat: tests/test_quat.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+test-quat: $(BUILD)/test_quat
+	./$(BUILD)/test_quat
+
+$(BUILD)/test_mat3: tests/test_mat3.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+test-mat3: $(BUILD)/test_mat3
+	./$(BUILD)/test_mat3
+
+$(BUILD)/test_physics_c.o: tests/test_physics_c.c include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/test_physics_c: $(BUILD)/test_physics_c.o $(LIB) | $(BUILD)
+	$(CXX) $^ -o $@
+
+test-physics-c: $(BUILD)/test_physics_c
+	./$(BUILD)/test_physics_c
+
+# The same C11 source in the two other forms: FV_USE_EXTERN (the library's extern symbols) and the
+# pure-C fallback (no intrinsics). Each form still compares the batch output against the per-value API
+# bit for bit, so the three forms are one implementation from the caller's point of view.
+$(BUILD)/test_physics_c_extern.o: tests/test_physics_c.c include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DFV_USE_EXTERN -c $< -o $@
+
+$(BUILD)/test_physics_c_extern: $(BUILD)/test_physics_c_extern.o $(LIB) | $(BUILD)
+	$(CXX) $^ -o $@
+
+test-physics-extern: $(BUILD)/test_physics_c_extern
+	./$(BUILD)/test_physics_c_extern
+
+$(BUILD)/test_physics_c_pure.o: tests/test_physics_c.c include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DFV_I_NO_INTRINSICS -c $< -o $@
+
+$(BUILD)/test_physics_c_pure: $(BUILD)/test_physics_c_pure.o $(LIB) | $(BUILD)
+	$(CXX) $^ -o $@
+
+test-physics-pure: $(BUILD)/test_physics_c_pure
+	./$(BUILD)/test_physics_c_pure
+
+# FMA consumer: the worst real-world options for the bit-exactness promise. The test's own reference
+# expressions are wrapped in fp-contract=off (the file's pragma region), so this measures the header's
+# pragma, not the test's flags. A vfmadd count of 0 is the direct evidence that the kernel did not fuse.
+$(BUILD)/test_quat_fma.o: tests/test_quat.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(FMA_FLAGS) -std=c++17 -c $< -o $@
+
+$(BUILD)/test_quat_fma: $(BUILD)/test_quat_fma.o $(LIB) | $(BUILD)
+	$(CXX) $^ -o $@
+
+$(BUILD)/test_mat3_fma.o: tests/test_mat3.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(FMA_FLAGS) -std=c++17 -c $< -o $@
+
+$(BUILD)/test_mat3_fma: $(BUILD)/test_mat3_fma.o $(LIB) | $(BUILD)
+	$(CXX) $^ -o $@
+
+test-physics-fma: $(BUILD)/test_quat_fma $(BUILD)/test_mat3_fma
+	@if grep -qm1 '^flags.* fma' /proc/cpuinfo 2>/dev/null; then \
+	  ./$(BUILD)/test_quat_fma; \
+	  ./$(BUILD)/test_mat3_fma; \
+	  printf '  vfmadd in test_quat_fma.o: %s\n' \
+	    "$$(objdump -d --no-show-raw-insn $(BUILD)/test_quat_fma.o | grep -cE 'vfmadd')"; \
+	  printf '  vfmadd in test_mat3_fma.o: %s\n' \
+	    "$$(objdump -d --no-show-raw-insn $(BUILD)/test_mat3_fma.o | grep -cE 'vfmadd')"; \
+	else echo "  SKIP: no FMA on this machine, compilation only"; fi
+
+test-physics: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma
+	@echo "== P6 physics primitives: quat + mat3 scalar and SoA batch, all forms green =="
+
+$(BUILD)/bench_physics: tests/bench_physics.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+bench-physics: $(BUILD)/bench_physics
+	./$(BUILD)/bench_physics

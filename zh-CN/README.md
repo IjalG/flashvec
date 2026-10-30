@@ -33,6 +33,8 @@ fv_vec2_add_x4(pos, vel, pos, N);
 | `fv_vec3` | 12 B | 不加 padding，保持用户既有布局 |
 | `fv_vec4` | 16 B | `static_assert` 锁死大小 |
 | `fv_aabb2` | 16 B | 轴对齐包围盒 |
+| `fv_quat` | 16 B | 旋转；单位元 (0,0,0,1)；与 `fv_vec4` 布局兼容，但是不同类型 |
+| `fv_mat3` | 36 B | 行主序 3x3，与 `fv_mat4` 同约定（与 GLM 相反），9 float 紧凑无 padding |
 
 ## 标量 API
 
@@ -134,6 +136,32 @@ void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_v
 与普通 store 的比值是 **0.13–0.37**。同一轮在 L3 之外读到 **1.48–1.60x**。
 
 这个选择必须由调用方做，库不会自动切换。
+
+## 物理原语（P6）
+
+向量层之上的第一组领域类型：旋转 `fv_quat` 与 3x3 线性代数 `fv_mat3`。四元数不是 `fv_vec4`：乘法是不可交换的复合，零不是旋转，批量布局是四个分量数组。
+
+| 类型 | 大小 | 说明 |
+|---|---|---|
+| `fv_quat` | 16 B | `x/y/z/w`，单位元 `(0,0,0,1)`；与 `fv_vec4` 布局兼容但是不同类型 |
+| `fv_mat3` | 36 B | 行主序 `m[row*3+col]`，与 `fv_mat4` 同约定（与 GLM 相反），9 float 紧凑无 padding |
+
+标量 API：`fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / mul / rotate_vec3`；`fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat`。`fv_quat_mul(a,b)` 是 `a*b`，先作用 `b` 再作用 `a`；`fv_quat_normalize` 对长度 <= `FV_EPS` 返回单位元（不是零），这是与向量 normalize 唯一的有意差异；`rotate_vec3` 与 `from_quat` 假定 `q` 是单位四元数，不自动归一化。
+
+批量（SoA，每 ymm 8 个元素）：`fv_quat_mul_soa`、`fv_quat_normalize_soa`、`fv_quat_rotate_vec3_soa`、`fv_mat3_transform_vec3_soa`。四个入口对任意 n 与尾长都与逐值 API 逐位一致，且在同一 `fp-contract=off` pragma 内；`make test-physics-fma` 用 `-march=native -mfma -ffp-contract=fast` 消费者验证，`vfmadd=0`。
+
+实现：quat 乘 / 旋转、mat3 变换是 `target("avx2")` 里的纯 C，GCC 自动向量化成 256 位且零 shuffle（实测 40 / 40 / 21 条 AVX2 指令，0 个 `vpermps`/`vshufps`）；quat normalize 是编译器唯一没向量化的（保留 `sqrtss`/`divss` 与分支），因此单独写了 AVX2 内核（29 条 ymm）。其余不手写 intrinsic。
+
+初步测量（`make bench-physics`，同进程交错 A/B，11 轮配对，`taskset -c 0`，两次运行中位数；A/A 地板 8192 约 0.99–1.00、1M 约 0.93–1.07）：
+
+| 入口 | n = 8192 | n = 1M |
+|---|---|---|
+| `fv_quat_mul_soa` | 18.0–19.5x | 2.39–2.51x |
+| `fv_quat_normalize_soa` | 41.9–42.3x | 4.56–5.13x |
+| `fv_quat_rotate_vec3_soa` | 25.8x | 3.39–3.72x |
+| `fv_mat3_transform_vec3_soa` | 24.7–25.1x | 3.33–3.80x |
+
+基线是逐元素库调用（跨 TU、不可内联）。这些是初步数据，尚未走五条验收标准。
 
 ## 语义承诺
 
@@ -315,6 +343,11 @@ make test-inline             # 默认形态 vs FV_USE_EXTERN 形态逐字节对�
 make test-fma                # 消费者带 -march=native -mfma 时仍须位级一致
 make test-inline-effects     # 内联效果普查
 make test-stream             # _stream 与 _mask_inplace 的行为回归
+make test-physics            # 四元数 + mat3，全形态（C/C++ inline/extern/pure-C/FMA）
+make test-quat               # 四元数标量语义 + SoA 批量逐位一致
+make test-mat3               # 3x3 标量语义 + SoA 批量逐位一致
+make test-physics-c          # 纯 C11 翻译单元下的同一契约
+make bench-physics           # 逐元素调用 vs SoA 批量，同进程 A/B
 make test-vec4               # 四维标量与批量
 make test-vec34-inline       # 三维/四维批量形态对拍
 make test-refactor           # 以上全部 + 导出符号清单 + 反汇编普查
@@ -359,9 +392,10 @@ AVX2 只在头文件里用函数级 `target("avx2")` 属性加运行时 `__built
 
 - `_fast` 变体，例如 `rsqrtps` 加一次牛顿迭代的 normalize，约 2 ulp 误差，约快 10%。必须作为新函数提供，不能改默认语义。
 - 近似三角函数。`atan` 多项式约比 glibc 快 2.7 倍，但必须写明输入域。
-- 矩阵、四元数、角度与旋转。
+- 四元数插值（slerp / 最短弧 lerp）、轴角与欧拉角构造：需要 sin/cos 与输入域契约，是单独的设计决定。
+- `fv_mat4` 的完整运算（乘法 / 求逆）、从矩阵构造四元数、批量 `fv_mat3_mul`。
 - 三维与四维批量的绝对加速比测量。
 
-已经做完、旧版这里写「留给以后」的：三维批量入口（走 SoA）、四维向量（`fv_vec4` 加 `_x2` 与 `_soa` 批量）。见上面的 API 节。
+已经做完、旧版这里写「留给以后」的：三维批量入口（走 SoA）、四维向量（`fv_vec4` 加 `_x2` 与 `_soa` 批量）、以及上面的 `fv_quat` / `fv_mat3` 物理原语。
 
 更多分析见 `docs/optimization-report.md`。哪些方向已经实测过、结论是什么，见 `docs/acceptance-protocol.md` 的 §9。
