@@ -508,6 +508,11 @@ noise band and should be read as "no worse", not as a measured speedup.
   Never compare absolute values across fixtures; only ratios within one run are meaningful.
 - The 3D / 4D absolute speedups are now measured by `make bench-vec34` (table above); like every
   ratio here, quote them with the harness and the working set, not as a single-point multiplier.
+- AoS <-> SoA conversion is measured by `make bench-pack`: the round trip costs 0.28-0.32 ns/element
+  at n=8192 and 4.2-4.4 ns/element at n=1M. With an AoS input, `pack + add_soa + unpack` is 2.5x
+  slower than `fv_vec2_add_x4` at 8192 and 3.1x slower at 1M; for normalize the conversion still pays
+  3.9x at 8192 but loses 2.3x at 1M. SoA entries are for data that is already SoA, or
+  cache-resident plus expensive enough to amortize the conversion.
 
 The acceptance criteria are in `docs/acceptance-protocol.md`. The raw verdict table is
 `docs/research/raw/ab_campaign_verdict.txt`, which every `make run` overwrites, so quote it together
@@ -533,6 +538,7 @@ make test-fast               # _fast normalize accuracy + fv_atan_approx
 make bench-physics           # per-element calls vs SoA batch, same-process A/B
 make bench-fast              # exact vs _fast normalize
 make bench-vec34             # 3D / 4D absolute speedup over scalar calls
+make bench-pack              # AoS <-> SoA conversion cost and the SoA decision rule
 make test-vec4               # 4D scalar and batch
 make test-vec34-inline       # 3D/4D batch shape comparison
 make test-refactor           # all of the above plus symbol list and disassembly survey

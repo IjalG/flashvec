@@ -233,17 +233,25 @@ L3 on this machine is **4 MiB/CCX × 2 CCX = 8 MiB total on the chip**.
 
 ## 8. Where no trustworthy data exists (do not cite it as numbers)
 
-- Speedup **relative to scalar** for the three-component SoA batch (`fv_vec3_*_soa`) and the four-component
-  `_x2` / `_soa` batch: **TBD**.
-
-  This round measured only their **form difference**, i.e. library-internal definition vs header inline, over
-  13 entry points × 5 sizes = 65 points: 5 PASS / 8 FAIL (slower) / 52 INCONCLUSIVE, readings 0.97–1.93.
-  Those numbers may only be read as form, never cited as speedup; see §9 item 5.
-- `AoS↔SoA pack/unpack cost`: still unmeasured, and it directly decides whether the SoA entry points are worth it.
-- The scalar fallback path on non-AVX2 hardware: this machine has AVX2, so `__builtin_cpu_supports("avx2") == 0`
-  cannot be forced. Only structural evidence exists, namely section [9] of `verify/checks.sh`: the kernel is still
-  present in the baseline setting, and dispatch goes through the avx2 bit of `__cpu_model`. It has never run on a
-  real non-AVX2 machine.
+- **3D / 4D absolute speedup over scalar calls** is now measured by `make bench-vec34` (same-process
+  A/B, 11 paired rounds, same-round A/A control; the README and implementation log carry the table).
+  Quote it with the harness and the working set; it is a measurement-rig result, not the five-criterion
+  acceptance of §0.
+- **AoS <-> SoA pack/unpack cost** is now measured by `make bench-pack`:
+  the round trip is **0.28-0.32 ns/element at n=8192** and **4.2-4.4 ns/element at n=1M** (the latter is
+  DRAM-bound). The decision rule follows from that:
+  with an AoS input, `pack + fv_vec2_add_soa + unpack` is **2.5x slower** than `fv_vec2_add_x4` at
+  8192 and **3.1x slower** at 1M, because the conversion is pure added traffic; for an expensive op the
+  picture flips while the data is cache-resident (`pack + fv_vec2_normalize_soa + unpack` is **3.9x
+  faster** than per-element normalize at 8192), but at 1M the extra traffic makes it **2.3x slower**.
+  Practical reading: the SoA entries pay when the caller's data is already SoA, or when it is
+  cache-resident and the operation is expensive enough to amortize the conversion. They are not a
+  drop-in win for a cheap op over an AoS array.
+- **The scalar fallback on non-AVX2 hardware** is a hardware-availability limit, not a pending library
+  item. This machine has AVX2, so `__builtin_cpu_supports("avx2") == 0` cannot be forced; the
+  source-level path is exercised by `-DFV_I_NO_INTRINSICS`, and the structural evidence is
+  `verify/checks.sh` section [9] (the kernel is present at the baseline setting and dispatch goes
+  through the avx2 bit of `__cpu_model`). It has not run on a real non-AVX2 machine.
 
 ---
 

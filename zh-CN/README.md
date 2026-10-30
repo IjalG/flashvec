@@ -362,6 +362,7 @@ N = 8192，每数组 32 KB，L2 驻留：
 - 收益主要来自消除跨 TU 调用边界，不是 intrinsics。同一份数学放进头文件内联后，`-O3 -march=native` 的自动向量化几乎追平手写 AVX2。
 - 这台机器长期有外部负载，同一份代码跨运行可差 20–25%。不同夹具的绝对值不要直接比，只看同一次运行内的比值。
 - 三维 / 四维批量的绝对加速比现在由 `make bench-vec34` 测量（见上表）；引用时带上 harness 与工作集，不要当成单点精确倍数。
+- AoS↔SoA 拆装由 `make bench-pack` 测量：往返成本在 n=8192 约 0.28–0.32 ns/元素、n=1M 约 4.2–4.4 ns/元素。AoS 输入下，`pack + add_soa + unpack` 在 8192 比 `fv_vec2_add_x4` 慢 2.5 倍、1M 慢 3.1 倍；normalize 在 8192 仍快 3.9 倍，但 1M 慢 2.3 倍。SoA 入口适合数据本来就是 SoA，或数据驻留 cache 且运算足够贵的情况。
 
 判定标准见 `docs/acceptance-protocol.md`。原始判定表在 `docs/research/raw/ab_campaign_verdict.txt`，每次 `make run` 会覆盖，引用时请连同时刻。
 
@@ -385,6 +386,7 @@ make test-fast               # _fast normalize 精度 + fv_atan_approx
 make bench-physics           # 逐元素调用 vs SoA 批量，同进程 A/B
 make bench-fast              # 精确 vs _fast normalize
 make bench-vec34             # 三维 / 四维相对标量调用的绝对加速比
+make bench-pack              # AoS↔SoA 拆装成本与 SoA 判断规则
 make test-vec4               # 四维标量与批量
 make test-vec34-inline       # 三维/四维批量形态对拍
 make test-refactor           # 以上全部 + 导出符号清单 + 反汇编普查

@@ -454,6 +454,11 @@ rig, not a missing library feature.
 At n=8192 the A/A floor was 0.995-0.997; at n=1M it was 0.89-1.08, so the 1M fast gains are inside
 the noise band. These are measurement-rig numbers, not five-criterion acceptance evidence.
 
+AoS <-> SoA conversion (`make bench-pack`): round trip 0.28-0.32 ns/element at 8192, 4.2-4.4 at 1M.
+With an AoS input, `pack + add_soa + unpack` is 2.5x slower than `fv_vec2_add_x4` at 8192 and 3.1x at
+1M; `pack + normalize_soa + unpack` is 3.9x faster at 8192 but 2.3x slower at 1M. The rule: SoA
+entries pay for data that is already SoA, or cache-resident with an expensive operation.
+
 ### 9.5 Scope
 
 The explicit backlog is empty. The library deliberately does **not** include threading/scheduling,

@@ -644,7 +644,7 @@ bench-addmul: $(BUILD)/bench_addmul
 #   test-physics-c   plain C11 caller: scalar API links, batch entries compile and are bit-identical
 #   test-physics     all of the above forms (this is what test-all depends on)
 #   bench-physics    scalar-per-element vs SoA batch, same-process A/B, 11 paired rounds + A/A control
-.PHONY: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma test-physics test-mat4-ops test-fast bench-physics bench-fast bench-vec34
+.PHONY: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma test-physics test-mat4-ops test-fast bench-physics bench-fast bench-vec34 bench-pack
 
 $(BUILD)/flashvec_quat.o: src/flashvec_quat.cpp include/flashvec.h | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -763,3 +763,9 @@ $(BUILD)/bench_vec34: tests/bench_vec34.cpp $(LIB) include/flashvec.h | $(BUILD)
 
 bench-vec34: $(BUILD)/bench_vec34
 	./$(BUILD)/bench_vec34
+
+$(BUILD)/bench_pack: tests/bench_pack.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+bench-pack: $(BUILD)/bench_pack
+	./$(BUILD)/bench_pack
