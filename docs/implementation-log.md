@@ -155,7 +155,7 @@ report.
      for example, ranges from 0.35 to 1.24 ns/elem.
    - Only **ratios within one run** are meaningful.
 
-## 4. What was deliberately not done (and why)
+## 4. Deliberate non-goals and validation limits from P0/P1
 
 - **The `_idx` variants have no AVX2 kernel**: they are scalar loops, measured at only 1.08–1.35x. The
   reason is that `vgatherdps` costs about 10 cycles per instruction on Zen 2 (§3.4 of the report).
@@ -179,8 +179,10 @@ report.
 - One ymm of `_x2` holds exactly 2 elements; the number means the same as in `_x4`: how many elements fit
   in one 256-bit register.
 
-- **The `_fast` variants (rsqrt + Newton iteration) are not implemented**: they change the last bit and
-  must be offered as new functions; and they are measured at only about 10% faster.
+- **The `_fast` variants were deferred in P0/P1**: they change the last bit and had to be offered as new
+  functions. P7 added the normalize family (rsqrtps + one Newton iteration) as a separate approximate
+  contract; measured 1.05-1.13x at L2. Other `_fast` entries remain deliberate non-goals unless a
+  measurement justifies them.
 
 - **Runtime dispatch has been verified only on machines with AVX2**: the equivalence test that forces the
   scalar fallback passes, and turning the 11 dispatch sites into `if (0)` leaves 30+57+1098 all green.
