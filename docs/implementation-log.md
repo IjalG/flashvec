@@ -202,7 +202,7 @@ cd verify && make check          # 结构检查：头文件纯净度、编译选
 cd ../bench && make run          # 三档实现 vs 标量基准（另一个夹具，看趋势）
 ~~~
 
-## 6. Open decisions (mapping to §6 of the report)
+## 6. Decisions (mapping to §6 of the report)
 
 | Item | Status |
 |---|---|
@@ -211,7 +211,7 @@ cd ../bench && make run          # 三档实现 vs 标量基准（另一个夹�
 | `-march=native` | Not introduced (the recommended option of decision 3); the default build keeps the x86-64 baseline plus function-level `target` attribute dispatch |
 | `-fno-math-errno` in the defaults | Added (the recommended option of decision 4) |
 | Whether `fv_vec4` / three-component batch are needed | **Decided and implemented**, see below |
-| Whether `_fast` variants are needed | Open, pending real performance data (still not done) |
+| Whether `_fast` variants are needed | **Decided and implemented in P7**: `_fast` normalize family (rsqrtps + 1 NR), measured 1.05-1.13x at L2; see §9 |
 | `_stream` (NT store) | 6 entry points implemented, see below |
 | `_mask_inplace` | 1 entry point implemented, see below |
 
@@ -341,9 +341,9 @@ wrappers), `Makefile` (objects, test/bench targets), `README.md` (this group), t
 
 | Source | Result |
 |---|---|
-| `make test-quat` | 26,321 checks, 0 failures: scalar semantics (including general inverse) + batch bit-parity, n = 0..40 (every tail) + 63 / 1024 / 4097 |
-| `make test-mat3` | 14,182 checks, 0 failures: same coverage for the 3x3 API, including determinant/inverse/singular paths |
-| `make test-physics-c` | 3,916 checks, 0 failures; the same source also passes under `-DFV_USE_EXTERN` and `-DFV_I_NO_INTRINSICS` |
+| `make test-quat` | 30,359 checks, 0 failures: scalar semantics (inverse, from_mat3, interpolation, axis/Euler) + batch bit-parity, n = 0..40 (every tail) + 63 / 1024 / 4097 |
+| `make test-mat3` | 122,344 checks, 0 failures: same coverage for the 3x3 API, including determinant/inverse/singular paths and the batch mul/inverse parity |
+| `make test-physics-c` | 4,093 checks, 0 failures; the same source also passes under `-DFV_USE_EXTERN` and `-DFV_I_NO_INTRINSICS` |
 | `make test-physics-fma` | both C++ tests pass under `-march=native -mfma -ffp-contract=fast`; `vfmadd` = 0 in both consumer objects |
 | Vectorization census | quat mul 40, rotate 40, mat3 21 AVX2 instructions including loads/stores, 0 `vpermps`/`vshufps`; normalize 29 (explicit kernel) |
 | `make test-all` | green; `test-physics` is appended to the target list |
@@ -370,12 +370,91 @@ gain, consistent with the rest of the library. These numbers are **preliminary**
 acceptance of `docs/acceptance-protocol.md` has not been run for P6. Quote them with the harness and
 the run.
 
-### 8.5 What remains
+### 8.5 Items closed by P7
 
-- Quaternion interpolation (slerp / shortest-arc lerp), axis-angle and Euler construction (sin/cos +
-  domain contract).
-- Full `fv_mat4` operations (multiply / inverse); quaternion-from-matrix; batch `fv_mat3_mul` (the
-  per-body scalar 3x3 inverse is the current use case, so a batch inverse is not planned yet).
-- Absolute speedup for the 3D/4D entries (still unmeasured).
-- A hardened P6 A/B fixture under the five acceptance criteria; `bench-physics` is a preliminary
-  harness, not the acceptance one.
+P7 completed the list that used to sit here: quaternion interpolation / axis-angle / Euler, full
+`fv_mat4` multiply/inverse, quaternion-from-matrix, batch `fv_mat3_mul` / `fv_mat3_inverse_soa`,
+3D/4D absolute speedups, and the `_fast` + approximate-atan family. See section 9. The P6 bench is
+still a preliminary harness rather than the five-criterion acceptance fixture; that is a measurement
+rig, not a missing library feature.
+
+## 9. P7: closing the backlog
+
+### 9.1 What landed
+
+| Item | Status |
+|---|---|
+| `fv_mat4_mul` / `fv_mat4_inverse` / `fv_mat4_inverse_checked` (general 4x4) | done |
+| `fv_quat_from_mat3` (Shepperd, branch on largest diagonal) | done |
+| `fv_quat_nlerp` / `fv_quat_slerp` (shortest arc) | done |
+| `fv_quat_from_axis_angle` / `fv_quat_from_euler_xyz` | done |
+| `fv_mat3_mul_soa` / `fv_mat3_inverse_soa` | done |
+| `fv_vec2/vec3/vec4_normalize_soa_fast`, `fv_quat_normalize_soa_fast` | done |
+| `fv_atan_approx` (domain [-1,1], NaN outside) | done |
+| 3D / 4D absolute speedup measurement (`make bench-vec34`) | done |
+| English + Chinese README, this log, scope section (no pending list) | done |
+
+### 9.2 Contract decisions
+
+- **mat4 inverse is general**, not affine-only: the same value form / `_checked` pattern as mat3,
+  with the scale-relative test `|det| <= FV_EPS * max|entry|^4` and a zero-matrix result on singular.
+  `out` may alias `m`.
+- **`from_mat3` assumes a rotation matrix** (orthonormal, det +1). It normalizes the result, but a
+  non-rotation still yields a unit quaternion, not that matrix's rotation; the by-value form has no
+  error channel. Documented in the header.
+- **Interpolation is shortest-arc**: `nlerp` negates the second quaternion when dot < 0, normalizes,
+  and does not clamp `t`; `slerp` falls back to nlerp when dot > 0.9995 or sin(theta) underflows.
+  These use `sin/cos`, so they are accuracy-bounded and not bit-reproducible across libm builds.
+- **Axis-angle normalizes the axis** (zero axis -> identity); **Euler XYZ** means X first, then Y,
+  then Z (`q = qz*qy*qx`).
+- **The `_fast` family is a separate contract**: `rsqrtps` + one Newton step, relative error about
+  1-2 ulp on AVX2, exact `1/sqrtf` on the scalar fallback, same zero guard, no bit-identical promise.
+  The exact entries keep their promise unchanged.
+- **`fv_atan_approx` is domain-limited**: [-1,1], max abs error about 1.2e-5, NaN outside the domain
+  (clamping would silently return a wrong angle).
+- **mat3 batch mul/inverse stay scalar**: nine input arrays and nine output arrays are a
+  gather/scatter pattern the compiler cannot vectorize; the batch win is the removed call boundary.
+  The mat3 inverse helper uses the same determinant/threshold/cofactor expressions as the scalar
+  function, so the batch output is bit-identical.
+
+### 9.3 Evidence
+
+| Source | Result |
+|---|---|
+| `make test-quat` | 30,359 checks, 0 failures (inverse, from_mat3, nlerp/slerp, axis-angle, Euler, batch parity) |
+| `make test-mat3` | 122,344 checks, 0 failures (scalar + batch mul/inverse, singular paths, bit parity) |
+| `make test-mat4-ops` | 8,016 checks, 0 failures (mul reference, inverse identity, singular, alias) |
+| `make test-fast` | 81,241 checks, 0 failures (atan on [-1,1] vs atanf, fast vs exact relative error, guard) |
+| `make test-physics-c` | 4,093 checks, 0 failures in three forms (C11 inline / `FV_USE_EXTERN` / pure-C) |
+| FMA consumer | `test_quat` / `test_mat3` compile with `-march=native -mfma -ffp-contract=fast`; `vfmadd = 0` |
+| `make test-all` | 1,864,380 total checks, 0 failures |
+
+### 9.4 Measurements
+
+3D / 4D absolute speedup (`make bench-vec34`, same-process A/B, 11 paired rounds, `taskset -c 0`):
+
+| Entry | n = 8192 | n = 1M |
+|---|---|---|
+| `fv_vec3_add_soa` | 8.8x | 2.16x |
+| `fv_vec3_scale_soa` | 13.9x | 1.43x |
+| `fv_vec3_normalize_soa` | 10.1x | 2.11x |
+| `fv_vec4_add_x2` | 35.2x | 2.53x |
+| `fv_vec4_scale_x2` | 25.3x | 2.05x |
+| `fv_vec4_normalize_soa` | 38.8x | 4.34x |
+
+`_fast` vs exact (`make bench-fast`):
+
+| Entry | n = 8192 | n = 1M |
+|---|---|---|
+| `fv_vec2_normalize_soa_fast` | 1.125x | 1.03x |
+| `fv_vec3_normalize_soa_fast` | 1.054x | 1.04x |
+
+At n=8192 the A/A floor was 0.995-0.997; at n=1M it was 0.89-1.08, so the 1M fast gains are inside
+the noise band. These are measurement-rig numbers, not five-criterion acceptance evidence.
+
+### 9.5 Scope
+
+The explicit backlog is empty. The library deliberately does **not** include threading/scheduling,
+allocation or arena ownership, a double-precision batch family, or `_fast` variants of every entry;
+those would change the value-semantics / no-allocation contract rather than complete it. They are
+scope decisions, not pending work.

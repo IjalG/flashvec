@@ -92,6 +92,34 @@ static void test_quat_scalar(void)
         CHECK(fabsf(u.w - 1.0f) < 1e-6f);
     }
 
+    /* Rotation matrix -> quaternion round trip is the same rotation (q or -q). */
+    {
+        fv_quat qy = fv_quat_make(0, sqrtf(0.5f), 0, sqrtf(0.5f));
+        fv_mat3 m = fv_mat3_from_quat(qy);
+        fv_quat q2 = fv_quat_from_mat3(&m);
+        int same = fabsf(q2.x - qy.x) < 1e-5f && fabsf(q2.y - qy.y) < 1e-5f &&
+                   fabsf(q2.z - qy.z) < 1e-5f && fabsf(q2.w - qy.w) < 1e-5f;
+        int neg = fabsf(q2.x + qy.x) < 1e-5f && fabsf(q2.y + qy.y) < 1e-5f &&
+                  fabsf(q2.z + qy.z) < 1e-5f && fabsf(q2.w + qy.w) < 1e-5f;
+        CHECK(same || neg);
+        CHECK(fabsf(fv_quat_len(q2) - 1.0f) < 1e-5f);
+    }
+
+    /* Interpolation / axis-angle / Euler basics. */
+    {
+        const float pi = 3.14159265358979323846f;
+        fv_quat qy90 = fv_quat_from_axis_angle(fv_vec3_make(0, 1, 0), pi / 2.0f);
+        fv_quat q = fv_quat_slerp(fv_quat_identity(), qy90, 0.5f);
+        fv_vec3 r = fv_quat_rotate_vec3(q, fv_vec3_make(1, 0, 0));
+        fv_quat qe = fv_quat_from_euler_xyz(0, pi / 2.0f, 0);
+        fv_quat qn = fv_quat_nlerp(fv_quat_identity(), qy90, 0.5f);
+        CHECK(fabsf(r.x - 0.70710677f) < 1e-5f);
+        CHECK(fabsf(r.y) < 1e-5f);
+        CHECK(fabsf(r.z + 0.70710677f) < 1e-5f);
+        CHECK(fabsf(qe.y - qy90.y) < 1e-5f && fabsf(qe.w - qy90.w) < 1e-5f);
+        CHECK(fabsf(fv_quat_len(qn) - 1.0f) < 1e-6f);
+    }
+
     /* General inverse: q * inverse(q) is the identity; the zero quaternion is reported as invalid. */
     {
         fv_quat q = fv_quat_make(0.2f, -0.3f, 0.4f, 0.8f);
@@ -128,6 +156,54 @@ static void test_mat3_scalar(void)
     {
         fv_mat3 qm = fv_mat3_from_quat(fv_quat_identity());
         CHECK(memcmp(&qm, &id, sizeof(id)) == 0);
+    }
+
+    /* Batch mul / inverse (n = 8): bit-identical to the per-value API. */
+    {
+        float a[9][8];
+        float b[9][8];
+        float o[9][8];
+        int i;
+        int k;
+        for (i = 0; i < 8; ++i) {
+            for (k = 0; k < 9; ++k) {
+                a[k][i] = seq(i, k + 1);
+                b[k][i] = seq(i, k + 2);
+            }
+        }
+        /* Lane 0 is singular: the batch inverse must write nine zeros. */
+        for (k = 0; k < 9; ++k) {
+            a[k][0] = 0.0f;
+        }
+        fv_mat3_mul_soa(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8],
+                        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8],
+                        o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], 8);
+        for (i = 0; i < 8; ++i) {
+            fv_mat3 ma;
+            fv_mat3 mb;
+            fv_mat3 want;
+            for (k = 0; k < 9; ++k) {
+                ma.m[k] = a[k][i];
+                mb.m[k] = b[k][i];
+            }
+            want = fv_mat3_mul(&ma, &mb);
+            for (k = 0; k < 9; ++k) {
+                CHECK(same_bits(o[k][i], want.m[k]));
+            }
+        }
+        fv_mat3_inverse_soa(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8],
+                            o[0], o[1], o[2], o[3], o[4], o[5], o[6], o[7], o[8], 8);
+        for (i = 0; i < 8; ++i) {
+            fv_mat3 ma;
+            fv_mat3 want;
+            for (k = 0; k < 9; ++k) {
+                ma.m[k] = a[k][i];
+            }
+            want = fv_mat3_inverse(&ma);
+            for (k = 0; k < 9; ++k) {
+                CHECK(same_bits(o[k][i], want.m[k]));
+            }
+        }
     }
 
     /* Inverse: identity, a known matrix (det = 9), and the singular/checked path. */
@@ -224,13 +300,55 @@ static void test_batch(size_t n)
     }
 }
 
+static void test_mat4_scalar(void)
+{
+    fv_mat4 id = fv_mat4_identity();
+    fv_mat4 t = id;
+    fv_mat4 inv;
+    fv_mat4 p;
+    fv_mat4 zero;
+    int k;
+
+    t.m[3] = 2.0f;
+    t.m[7] = -3.0f;
+    t.m[11] = 0.5f;
+    CHECK(fv_mat4_inverse_checked(&t, &inv) == 1);
+    CHECK(fabsf(inv.m[3] + 2.0f) < 1e-6f);
+    CHECK(fabsf(inv.m[7] - 3.0f) < 1e-6f);
+    p = fv_mat4_mul(&t, &inv);
+    for (k = 0; k < 16; ++k) {
+        CHECK(fabsf(p.m[k] - id.m[k]) < 1e-6f);
+    }
+
+    memset(&zero, 0, sizeof(zero));
+    CHECK(fv_mat4_inverse_checked(&zero, &inv) == 0);
+    CHECK(memcmp(&inv, &zero, sizeof(zero)) == 0);
+}
+
+static void test_fast_c(void)
+{
+    float ax[8] = { 3.0f, 0.0f, 1.0f, 2.0f, -1.0f, 4.0f, 0.5f, -2.0f };
+    float ay[8] = { 4.0f, 0.0f, 0.0f, 1.0f, 2.0f, 3.0f, -0.5f, 1.0f };
+    float ox[8];
+    float oy[8];
+
+    fv_vec2_normalize_soa_fast(ax, ay, ox, oy, 8);
+    CHECK(fabsf(ox[0] - 0.6f) < 1e-5f);
+    CHECK(fabsf(oy[0] - 0.8f) < 1e-5f);
+    CHECK(ox[1] == 0.0f && oy[1] == 0.0f);
+    CHECK(fabsf(fv_atan_approx(1.0f) - atanf(1.0f)) < 3e-5f);
+    CHECK(fv_atan_approx(2.0f) != fv_atan_approx(2.0f)); /* NaN outside the domain */
+}
+
 int main(void)
 {
     size_t n;
 
-    printf("== fv_quat / fv_mat3 from C11 ==\n");
+    printf("== fv_quat / fv_mat3 / fv_mat4 / fast from C11 ==\n");
     test_quat_scalar();
     test_mat3_scalar();
+    test_mat4_scalar();
+    test_fast_c();
 
     test_batch(0);
     test_batch(1);

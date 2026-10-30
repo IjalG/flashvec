@@ -13,7 +13,8 @@
  *     defined as static inline in this header's "implementation of the batch entry points" section,
  *     so the caller's translation unit gets the implementation directly, with no call across a translation unit;
  *     the P6 physics group adds four more SoA entries (quaternion multiply / normalize / rotate-vector,
- *     mat3 transform) in the same section;
+ *     mat3 transform), P7 adds the mat3 multiply / inverse pair and four _fast normalize entries, all in
+ *     the same section;
  *   - The same-named extern symbols are still exported by the library (src/flashvec_batch.cpp), so old consumers still link;
  *   - Whether intrinsics appear does not depend on the language, only on "compiler + architecture": x86/x86_64 with GCC
  *     or Clang -- **a C translation unit and a C++ translation unit follow the same rule**.
@@ -383,10 +384,12 @@ fv_vec2 fv_vec2_maddv(fv_vec2 a, fv_vec2 b, fv_vec2 c);
  *     v' = R*v. It is the matrix form of the same rotation, with its own (also fixed) expression order;
  *   - fv_mat3_mul(a, b) applies b first then a, matching fv_quat_mul and fv_mat4's row-major use.
  *
- * No fv_quat_lerp / slerp in this round: interpolation has two defensible conventions (shortest-arc or
- * not) and a half-angle trig path; it is a separate design decision, not a missing line. Rotation from
- * axis/angle and from Euler angles likewise wait, because they bring sin/cos and an input-domain
- * contract that the exactness story has to state explicitly.
+ * Interpolation and angle construction (P7): fv_quat_nlerp / fv_quat_slerp use the shortest-arc
+ * convention (dot < 0 negates the second quaternion) and normalize the result; fv_quat_from_axis_angle
+ * and fv_quat_from_euler_xyz are the sin/cos constructors. These are the points where the exactness
+ * story changes: they involve trigonometry, so their results are accuracy-bounded (not bit-reproducible
+ * across libm implementations) and they have no batch form. The exact, bit-reproducible properties
+ * remain the arithmetic/transform entries above.
  */
 fv_quat fv_quat_make(fv_real x, fv_real y, fv_real z, fv_real w);
 fv_quat fv_quat_add(fv_quat a, fv_quat b);
@@ -416,6 +419,24 @@ fv_quat fv_quat_mul(fv_quat a, fv_quat b);
 /* Rotate v by the **unit** quaternion q: v' = q * (v, 0) * conjugate(q). No normalization is done here. */
 fv_vec3 fv_quat_rotate_vec3(fv_quat q, fv_vec3 v);
 
+/* Shortest-arc normalized linear interpolation: if dot(a,b) < 0, b is negated first, then
+ * out = normalize(a + (b - a)*t). t is not clamped (extrapolation is allowed), and the result is
+ * always normalized. The sign fix means exactly opposite quaternions become equal, so the usual
+ * "opposite at t = 0.5" degeneration does not occur; the only degenerate case is a zero input or a
+ * zero interpolated vector, where normalize returns the identity. */
+fv_quat fv_quat_nlerp(fv_quat a, fv_quat b, fv_real t);
+/* Shortest-arc spherical interpolation. It falls back to nlerp when the angle is tiny (dot above
+ * 1 - 1e-5) or when sin(theta) underflows, so the endpoints and the near-identical case stay stable.
+ * Inputs are assumed unit (the result is normalized); t is not clamped. */
+fv_quat fv_quat_slerp(fv_quat a, fv_quat b, fv_real t);
+
+/* Construction from axis-angle: the axis is normalized internally (zero axis -> the identity), the
+ * angle is in radians, and the result is the unit quaternion (axis*sin(angle/2), cos(angle/2)). */
+fv_quat fv_quat_from_axis_angle(fv_vec3 axis, fv_real angle);
+/* Construction from Euler angles in radians, applied X first, then Y, then Z:
+ * q = qz * qy * qx (so qx acts on the vector first). The result is unit. */
+fv_quat fv_quat_from_euler_xyz(fv_real x, fv_real y, fv_real z);
+
 /* Row-major 3x3 from three row vectors (r0 = m[0..2], r1 = m[3..5], r2 = m[6..8]). */
 fv_mat3 fv_mat3_from_rows(fv_vec3 r0, fv_vec3 r1, fv_vec3 r2);
 /* out = m * v, with m row-major and v a column vector. */
@@ -426,6 +447,11 @@ fv_mat3 fv_mat3_mul(const fv_mat3 *a, const fv_mat3 *b);
 fv_mat3 fv_mat3_transpose(const fv_mat3 *m);
 /* Row-major rotation matrix of a **unit** quaternion: v' = R*v has the same rotation as fv_quat_rotate_vec3. */
 fv_mat3 fv_mat3_from_quat(fv_quat q);
+/* Inverse mapping: rotation matrix -> unit quaternion (Shepperd's branch-on-largest-diagonal method,
+ * so the divisor is never the small one). The matrix must be a rotation (orthonormal, det +1); the
+ * result is normalized. A non-rotation still yields a unit quaternion, but it is not that matrix's
+ * rotation -- there is no error channel in the by-value form. */
+fv_quat fv_quat_from_mat3(const fv_mat3 *m);
 
 /* Determinant, row-major, evaluated as
  * m00*(m11*m22 - m12*m21) - m01*(m10*m22 - m12*m20) + m02*(m10*m21 - m11*m20). */
@@ -438,6 +464,34 @@ fv_real fv_mat3_determinant(const fv_mat3 *m);
 fv_mat3 fv_mat3_inverse(const fv_mat3 *m);
 int fv_mat3_inverse_checked(const fv_mat3 *m, fv_mat3 *out);
 
+/* ---------------- 4x4 matrix operations (P7) ----------------
+ * fv_mat4 is row-major (m[row*4+col], the same convention as fv_mat3 and the opposite of GLM). The
+ * transform entry points above keep the affine precondition (last row (0,0,0,1)); the operations here
+ * are general 4x4 operations and do not require it.
+ *
+ *   mul: out = a*b, row-major, applies b first then a; the inner sum is left to right
+ *        ((ai0*b0j + ai1*b1j) + ai2*b2j) + ai3*b3j.
+ *   inverse: the adjugate / determinant closed form. A matrix is treated as singular when
+ *        |det| <= FV_EPS * max|entry|^4; the value form returns the zero matrix and the _checked form
+ *        returns 1/0 (writing the zero matrix on failure). *out may alias *m in the _checked form.
+ *
+ * General 4x4, not affine-only: an affine-specialized inverse would be cheaper, but "full operations"
+ * means a caller can multiply or invert the matrices the library already accepts, including a
+ * non-affine one.
+ */
+fv_mat4 fv_mat4_mul(const fv_mat4 *a, const fv_mat4 *b);
+fv_mat4 fv_mat4_inverse(const fv_mat4 *m);
+int fv_mat4_inverse_checked(const fv_mat4 *m, fv_mat4 *out);
+
+/* ---------------- approximate math (P7) ----------------
+ * fv_atan_approx is a polynomial for atan on the documented domain [-1, 1], evaluated with Horner's
+ * rule. Max absolute error is about 1.2e-5 (tested against atanf). Outside [-1, 1] and for NaN it
+ * returns NaN: clamping would silently return a wrong angle, and the caller can use the identity
+ * atan(x) = sign(x)*pi/2 - atan(1/x) for the rest of the range. This is an approximate entry point:
+ * it does not promise the libm result, and there is no batch form.
+ */
+fv_real fv_atan_approx(fv_real x);
+
 /* ============================ batch entry points (P1) ============================
  *
  * Why this group exists: the per-element API is a call across translation units, which GCC outright refuses to vectorize
@@ -446,7 +500,7 @@ int fv_mat3_inverse_checked(const fv_mat3 *m, fv_mat3 *out);
  * A batch entry point trades "one call per element" for "one call per batch"; the library then decides whether to use SIMD.
  *
  * Implementation forms (three macros are the whole switchboard)
- *   default         this header provides static inline implementations of the P1 group's 52 batch entry points and the P6 group's four physics entries (see "implementation of the batch entry points" at the end),
+ *   default         this header provides static inline implementations of the P1 group's 52 batch entry points, the P6 group's four physics entries and the P7 mat3/fast entries (see "implementation of the batch entry points" at the end),
  *                   so the caller's translation unit gets the function bodies directly;
  *   FV_USE_EXTERN   the header carries only the extern declarations below and calls go into libflashvec.a -- the pre-refactor behaviour;
  *                   this is also the entry for a C caller that wants the AVX2 kernels (a C translation unit takes no intrinsics; see the file header);
@@ -1021,6 +1075,64 @@ void fv_mat3_transform_vec3_soa(const float *__restrict m00, const float *__rest
                                 const float *__restrict vz,
                                 float *__restrict ox, float *__restrict oy,
                                 float *__restrict oz, size_t n);
+
+/* 9x9 SoA pair: out = a*b, nine component arrays per operand. The expressions are the scalar
+ * fv_mat3_mul's, lane by lane: out[i][j] = ((ai0*b0j + ai1*b1j) + ai2*b2j). Bit-identical to the
+ * per-value function for every n and tail. */
+void fv_mat3_mul_soa(const float *__restrict a00, const float *__restrict a01,
+                     const float *__restrict a02, const float *__restrict a10,
+                     const float *__restrict a11, const float *__restrict a12,
+                     const float *__restrict a20, const float *__restrict a21,
+                     const float *__restrict a22,
+                     const float *__restrict b00, const float *__restrict b01,
+                     const float *__restrict b02, const float *__restrict b10,
+                     const float *__restrict b11, const float *__restrict b12,
+                     const float *__restrict b20, const float *__restrict b21,
+                     const float *__restrict b22,
+                     float *__restrict o00, float *__restrict o01,
+                     float *__restrict o02, float *__restrict o10,
+                     float *__restrict o11, float *__restrict o12,
+                     float *__restrict o20, float *__restrict o21,
+                     float *__restrict o22, size_t n);
+
+/* Per-element inverse with the same scale-relative singularity test as fv_mat3_inverse: a singular
+ * lane writes nine zeros and is not reported separately (the batch form has no per-lane status).
+ * Bit-identical to the per-value function for every n and tail. */
+void fv_mat3_inverse_soa(const float *__restrict m00, const float *__restrict m01,
+                         const float *__restrict m02, const float *__restrict m10,
+                         const float *__restrict m11, const float *__restrict m12,
+                         const float *__restrict m20, const float *__restrict m21,
+                         const float *__restrict m22,
+                         float *__restrict o00, float *__restrict o01,
+                         float *__restrict o02, float *__restrict o10,
+                         float *__restrict o11, float *__restrict o12,
+                         float *__restrict o20, float *__restrict o21,
+                         float *__restrict o22, size_t n);
+
+/* ---------------- _fast approximate normalize entries (P7) ----------------
+ * rsqrtps + one Newton-Raphson iteration instead of sqrtps + divps. The result is **approximate**
+ * (relative error about 1-2 ulp on AVX2; the scalar fallback uses 1/sqrtf and is exact) and is
+ * deliberately not bit-identical to the exact normalize entries -- these are new names in a separate
+ * family, and the exact entries above keep their promise unchanged.
+ *
+ * Zero guard: the same values as the exact entries (a vec entry writes zeros, the quat entry writes
+ * the identity (0,0,0,1)) when the squared length is <= FV_EPS_SQR. That guard is a blend, so no NaN
+ * escapes from the 0 * inf product. Preconditions (__restrict, non-overlap, n == 0 touches no
+ * pointer, NULL allowed) are the same as the exact SoA entries. */
+void fv_vec2_normalize_soa_fast(const float *__restrict ax, const float *__restrict ay,
+                                float *__restrict ox, float *__restrict oy, size_t n);
+void fv_vec3_normalize_soa_fast(const float *__restrict ax, const float *__restrict ay,
+                                const float *__restrict az,
+                                float *__restrict ox, float *__restrict oy,
+                                float *__restrict oz, size_t n);
+void fv_vec4_normalize_soa_fast(const float *__restrict ax, const float *__restrict ay,
+                                const float *__restrict az, const float *__restrict aw,
+                                float *__restrict ox, float *__restrict oy,
+                                float *__restrict oz, float *__restrict ow, size_t n);
+void fv_quat_normalize_soa_fast(const float *__restrict ax, const float *__restrict ay,
+                                const float *__restrict az, const float *__restrict aw,
+                                float *__restrict ox, float *__restrict oy,
+                                float *__restrict oz, float *__restrict ow, size_t n);
 
 #endif /* FV_USE_EXTERN || FV_BUILD: the public names are declarations only */
 
@@ -4305,6 +4417,421 @@ static inline void fv_i_mat3_transform_vec3_soa(const float *__restrict m00,
 }
 
 
+
+/* ---------------- mat3 batch mul / inverse (P7) ----------------
+ * Gather/scatter loops: nine input arrays and nine output arrays, so there is no contiguous vector to
+ * load and the compiler cannot vectorize them into ymm arithmetic. They stay plain C on purpose -- the
+ * batch form's win here is the removed cross-TU call boundary, not SIMD width -- and they are
+ * bit-identical to the per-value functions because they call the same expression helpers.
+ */
+
+static inline void fv_i_s_mat3_mul9(const float *__restrict a, const float *__restrict b,
+                                    float *__restrict o)
+{
+    int i;
+    int j;
+    for (i = 0; i < 3; ++i) {
+        for (j = 0; j < 3; ++j) {
+            o[i * 3 + j] = (a[i * 3 + 0] * b[0 * 3 + j] + a[i * 3 + 1] * b[1 * 3 + j]) +
+                           a[i * 3 + 2] * b[2 * 3 + j];
+        }
+    }
+}
+
+/* The same determinant / scale threshold / cofactor expressions as fv_mat3_inverse. */
+static inline int fv_i_s_mat3_inv9(const float *__restrict m, float *__restrict o)
+{
+    fv_real det = (m[0] * (m[4] * m[8] - m[5] * m[7]) -
+                   m[1] * (m[3] * m[8] - m[5] * m[6])) +
+                  m[2] * (m[3] * m[7] - m[4] * m[6]);
+    fv_real scale = (fv_real)0;
+    int k;
+    for (k = 0; k < 9; ++k) {
+        fv_real a = m[k] < (fv_real)0 ? -m[k] : m[k];
+        if (a > scale) {
+            scale = a;
+        }
+    }
+    if (!(scale > (fv_real)0) ||
+        !((det < (fv_real)0 ? -det : det) > FV_EPS * ((scale * scale) * scale))) {
+        for (k = 0; k < 9; ++k) {
+            o[k] = (fv_real)0;
+        }
+        return 0;
+    }
+    {
+        fv_real inv = (fv_real)1 / det;
+        o[0] = (m[4] * m[8] - m[5] * m[7]) * inv;
+        o[1] = (m[2] * m[7] - m[1] * m[8]) * inv;
+        o[2] = (m[1] * m[5] - m[2] * m[4]) * inv;
+        o[3] = (m[5] * m[6] - m[3] * m[8]) * inv;
+        o[4] = (m[0] * m[8] - m[2] * m[6]) * inv;
+        o[5] = (m[2] * m[3] - m[0] * m[5]) * inv;
+        o[6] = (m[3] * m[7] - m[4] * m[6]) * inv;
+        o[7] = (m[1] * m[6] - m[0] * m[7]) * inv;
+        o[8] = (m[0] * m[4] - m[1] * m[3]) * inv;
+        return 1;
+    }
+}
+
+static inline void fv_i_mat3_mul_soa(const float *__restrict a00,
+                     const float *__restrict a01,
+                     const float *__restrict a02,
+                     const float *__restrict a10,
+                     const float *__restrict a11,
+                     const float *__restrict a12,
+                     const float *__restrict a20,
+                     const float *__restrict a21,
+                     const float *__restrict a22,
+                     const float *__restrict b00,
+                     const float *__restrict b01,
+                     const float *__restrict b02,
+                     const float *__restrict b10,
+                     const float *__restrict b11,
+                     const float *__restrict b12,
+                     const float *__restrict b20,
+                     const float *__restrict b21,
+                     const float *__restrict b22,
+                     float *__restrict o00,
+                     float *__restrict o01,
+                     float *__restrict o02,
+                     float *__restrict o10,
+                     float *__restrict o11,
+                     float *__restrict o12,
+                     float *__restrict o20,
+                     float *__restrict o21,
+                     float *__restrict o22,
+                     size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; ++i) {
+        float a[9];
+        float b[9];
+        float o[9];
+        a[0] = a00[i]; a[1] = a01[i]; a[2] = a02[i];
+        a[3] = a10[i]; a[4] = a11[i]; a[5] = a12[i];
+        a[6] = a20[i]; a[7] = a21[i]; a[8] = a22[i];
+        b[0] = b00[i]; b[1] = b01[i]; b[2] = b02[i];
+        b[3] = b10[i]; b[4] = b11[i]; b[5] = b12[i];
+        b[6] = b20[i]; b[7] = b21[i]; b[8] = b22[i];
+        fv_i_s_mat3_mul9(a, b, o);
+        o00[i] = o[0]; o01[i] = o[1]; o02[i] = o[2];
+        o10[i] = o[3]; o11[i] = o[4]; o12[i] = o[5];
+        o20[i] = o[6]; o21[i] = o[7]; o22[i] = o[8];
+    }
+}
+
+static inline void fv_i_mat3_inverse_soa(const float *__restrict m00,
+                         const float *__restrict m01,
+                         const float *__restrict m02,
+                         const float *__restrict m10,
+                         const float *__restrict m11,
+                         const float *__restrict m12,
+                         const float *__restrict m20,
+                         const float *__restrict m21,
+                         const float *__restrict m22,
+                         float *__restrict o00,
+                         float *__restrict o01,
+                         float *__restrict o02,
+                         float *__restrict o10,
+                         float *__restrict o11,
+                         float *__restrict o12,
+                         float *__restrict o20,
+                         float *__restrict o21,
+                         float *__restrict o22,
+                         size_t n)
+{
+    size_t i;
+    for (i = 0; i < n; ++i) {
+        float m[9];
+        float o[9];
+        m[0] = m00[i]; m[1] = m01[i]; m[2] = m02[i];
+        m[3] = m10[i]; m[4] = m11[i]; m[5] = m12[i];
+        m[6] = m20[i]; m[7] = m21[i]; m[8] = m22[i];
+        (void)fv_i_s_mat3_inv9(m, o);
+        o00[i] = o[0]; o01[i] = o[1]; o02[i] = o[2];
+        o10[i] = o[3]; o11[i] = o[4]; o12[i] = o[5];
+        o20[i] = o[6]; o21[i] = o[7]; o22[i] = o[8];
+    }
+}
+
+
+/* ---------------- _fast approximate normalize: rsqrtps + one Newton-Raphson step (P7) ----------------
+ * The exact normalize entries above stay as they are; these are separate names in a separate contract.
+ * One Newton iteration squares the ~2^-12 rsqrtps error, so the relative error is about 1e-7 (1-2 ulp);
+ * the scalar fallback uses 1/sqrtf and is exact. The zero guard is the same value as the exact entry
+ * (zeros, or the identity for the quaternion), applied by a blend so no NaN escapes. No FMA is used
+ * (the section is inside the fp-contract=off pragma), and the kernels only exist when FV_I_INTRINSICS. */
+
+#if FV_I_INTRINSICS
+
+/* vec2: rsqrtps + one Newton-Raphson step; the zero guard is a blend, not a branch. */
+FV_I_TARGET_AVX2 static inline void fv_i_vec2_norm_fast_avx2(                                                        const float *__restrict ax,
+                                                        const float *__restrict ay,
+                                                        float *__restrict ox,
+                                                        float *__restrict oy,
+                                                        size_t n)
+{
+    const __m256 eps2 = _mm256_set1_ps((float)FV_EPS_SQR);
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 half = _mm256_set1_ps((float)0.5);
+    const __m256 one_point_five = _mm256_set1_ps((float)1.5);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 x = _mm256_loadu_ps(ax + i);
+        __m256 y = _mm256_loadu_ps(ay + i);
+        __m256 len2 = _mm256_add_ps(_mm256_mul_ps(x, x), _mm256_mul_ps(y, y));
+        __m256 r = _mm256_rsqrt_ps(len2);
+        __m256 t = _mm256_mul_ps(_mm256_mul_ps(half, len2), _mm256_mul_ps(r, r));
+        r = _mm256_mul_ps(r, _mm256_sub_ps(one_point_five, t));
+        {
+            __m256 guard = _mm256_cmp_ps(len2, eps2, _CMP_LE_OQ);
+            _mm256_storeu_ps(ox + i, _mm256_blendv_ps(_mm256_mul_ps(x, r), zero, guard));
+            _mm256_storeu_ps(oy + i, _mm256_blendv_ps(_mm256_mul_ps(y, r), zero, guard));
+        }
+    }
+}
+
+/* vec3: rsqrtps + one Newton-Raphson step; the zero guard is a blend, not a branch. */
+FV_I_TARGET_AVX2 static inline void fv_i_vec3_norm_fast_avx2(                                                        const float *__restrict ax,
+                                                        const float *__restrict ay,
+                                                        const float *__restrict az,
+                                                        float *__restrict ox,
+                                                        float *__restrict oy,
+                                                        float *__restrict oz,
+                                                        size_t n)
+{
+    const __m256 eps2 = _mm256_set1_ps((float)FV_EPS_SQR);
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 half = _mm256_set1_ps((float)0.5);
+    const __m256 one_point_five = _mm256_set1_ps((float)1.5);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 x = _mm256_loadu_ps(ax + i);
+        __m256 y = _mm256_loadu_ps(ay + i);
+        __m256 z = _mm256_loadu_ps(az + i);
+        __m256 len2 = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(x, x), _mm256_mul_ps(y, y)), _mm256_mul_ps(z, z));
+        __m256 r = _mm256_rsqrt_ps(len2);
+        __m256 t = _mm256_mul_ps(_mm256_mul_ps(half, len2), _mm256_mul_ps(r, r));
+        r = _mm256_mul_ps(r, _mm256_sub_ps(one_point_five, t));
+        {
+            __m256 guard = _mm256_cmp_ps(len2, eps2, _CMP_LE_OQ);
+            _mm256_storeu_ps(ox + i, _mm256_blendv_ps(_mm256_mul_ps(x, r), zero, guard));
+            _mm256_storeu_ps(oy + i, _mm256_blendv_ps(_mm256_mul_ps(y, r), zero, guard));
+            _mm256_storeu_ps(oz + i, _mm256_blendv_ps(_mm256_mul_ps(z, r), zero, guard));
+        }
+    }
+}
+
+/* vec4: rsqrtps + one Newton-Raphson step; the zero guard is a blend, not a branch. */
+FV_I_TARGET_AVX2 static inline void fv_i_vec4_norm_fast_avx2(                                                        const float *__restrict ax,
+                                                        const float *__restrict ay,
+                                                        const float *__restrict az,
+                                                        const float *__restrict aw,
+                                                        float *__restrict ox,
+                                                        float *__restrict oy,
+                                                        float *__restrict oz,
+                                                        float *__restrict ow,
+                                                        size_t n)
+{
+    const __m256 eps2 = _mm256_set1_ps((float)FV_EPS_SQR);
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 half = _mm256_set1_ps((float)0.5);
+    const __m256 one_point_five = _mm256_set1_ps((float)1.5);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 x = _mm256_loadu_ps(ax + i);
+        __m256 y = _mm256_loadu_ps(ay + i);
+        __m256 z = _mm256_loadu_ps(az + i);
+        __m256 w = _mm256_loadu_ps(aw + i);
+        __m256 len2 = _mm256_add_ps(_mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(x, x), _mm256_mul_ps(y, y)), _mm256_mul_ps(z, z)), _mm256_mul_ps(w, w));
+        __m256 r = _mm256_rsqrt_ps(len2);
+        __m256 t = _mm256_mul_ps(_mm256_mul_ps(half, len2), _mm256_mul_ps(r, r));
+        r = _mm256_mul_ps(r, _mm256_sub_ps(one_point_five, t));
+        {
+            __m256 guard = _mm256_cmp_ps(len2, eps2, _CMP_LE_OQ);
+            _mm256_storeu_ps(ox + i, _mm256_blendv_ps(_mm256_mul_ps(x, r), zero, guard));
+            _mm256_storeu_ps(oy + i, _mm256_blendv_ps(_mm256_mul_ps(y, r), zero, guard));
+            _mm256_storeu_ps(oz + i, _mm256_blendv_ps(_mm256_mul_ps(z, r), zero, guard));
+            _mm256_storeu_ps(ow + i, _mm256_blendv_ps(_mm256_mul_ps(w, r), zero, guard));
+        }
+    }
+}
+
+/* quat: rsqrtps + one Newton-Raphson step; the zero guard is a blend, not a branch. */
+FV_I_TARGET_AVX2 static inline void fv_i_quat_norm_fast_avx2(                                                        const float *__restrict ax,
+                                                        const float *__restrict ay,
+                                                        const float *__restrict az,
+                                                        const float *__restrict aw,
+                                                        float *__restrict ox,
+                                                        float *__restrict oy,
+                                                        float *__restrict oz,
+                                                        float *__restrict ow,
+                                                        size_t n)
+{
+    const __m256 eps2 = _mm256_set1_ps((float)FV_EPS_SQR);
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 one = _mm256_set1_ps((float)1);
+    const __m256 half = _mm256_set1_ps((float)0.5);
+    const __m256 one_point_five = _mm256_set1_ps((float)1.5);
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 x = _mm256_loadu_ps(ax + i);
+        __m256 y = _mm256_loadu_ps(ay + i);
+        __m256 z = _mm256_loadu_ps(az + i);
+        __m256 w = _mm256_loadu_ps(aw + i);
+        __m256 len2 = _mm256_add_ps(_mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(x, x), _mm256_mul_ps(y, y)), _mm256_mul_ps(z, z)), _mm256_mul_ps(w, w));
+        __m256 r = _mm256_rsqrt_ps(len2);
+        __m256 t = _mm256_mul_ps(_mm256_mul_ps(half, len2), _mm256_mul_ps(r, r));
+        r = _mm256_mul_ps(r, _mm256_sub_ps(one_point_five, t));
+        {
+            __m256 guard = _mm256_cmp_ps(len2, eps2, _CMP_LE_OQ);
+            _mm256_storeu_ps(ox + i, _mm256_blendv_ps(_mm256_mul_ps(x, r), zero, guard));
+            _mm256_storeu_ps(oy + i, _mm256_blendv_ps(_mm256_mul_ps(y, r), zero, guard));
+            _mm256_storeu_ps(oz + i, _mm256_blendv_ps(_mm256_mul_ps(z, r), zero, guard));
+            _mm256_storeu_ps(ow + i, _mm256_blendv_ps(_mm256_mul_ps(w, r), one, guard));
+        }
+    }
+}
+
+#endif /* FV_I_INTRINSICS: _fast normalize kernels */
+
+static inline void fv_i_vec2_normalize_soa_fast(                                                   const float *__restrict ax,
+                                                   const float *__restrict ay,
+                                                   float *__restrict ox,
+                                                   float *__restrict oy,
+                                                   size_t n)
+{
+    size_t i = 0;
+#if FV_I_INTRINSICS
+    if (__builtin_cpu_supports("avx2") != 0) {
+        size_t bulk = n & ~(size_t)7;
+        if (bulk != 0) {
+            fv_i_vec2_norm_fast_avx2(ax, ay, ox, oy, bulk);
+        }
+        i = bulk;
+    }
+#endif
+    for (; i < n; ++i) {
+        fv_real len2 = ax[i] * ax[i] + ay[i] * ay[i];
+        if (len2 <= FV_EPS_SQR) {
+            ox[i] = (fv_real)0;
+            oy[i] = (fv_real)0;
+        } else {
+            fv_real inv = (fv_real)1 / sqrtf(len2);
+            ox[i] = ax[i] * inv;
+            oy[i] = ay[i] * inv;
+        }
+    }
+}
+
+static inline void fv_i_vec3_normalize_soa_fast(                                                   const float *__restrict ax,
+                                                   const float *__restrict ay,
+                                                   const float *__restrict az,
+                                                   float *__restrict ox,
+                                                   float *__restrict oy,
+                                                   float *__restrict oz,
+                                                   size_t n)
+{
+    size_t i = 0;
+#if FV_I_INTRINSICS
+    if (__builtin_cpu_supports("avx2") != 0) {
+        size_t bulk = n & ~(size_t)7;
+        if (bulk != 0) {
+            fv_i_vec3_norm_fast_avx2(ax, ay, az, ox, oy, oz, bulk);
+        }
+        i = bulk;
+    }
+#endif
+    for (; i < n; ++i) {
+        fv_real len2 = (ax[i] * ax[i] + ay[i] * ay[i]) + az[i] * az[i];
+        if (len2 <= FV_EPS_SQR) {
+            ox[i] = (fv_real)0;
+            oy[i] = (fv_real)0;
+            oz[i] = (fv_real)0;
+        } else {
+            fv_real inv = (fv_real)1 / sqrtf(len2);
+            ox[i] = ax[i] * inv;
+            oy[i] = ay[i] * inv;
+            oz[i] = az[i] * inv;
+        }
+    }
+}
+
+static inline void fv_i_vec4_normalize_soa_fast(                                                   const float *__restrict ax,
+                                                   const float *__restrict ay,
+                                                   const float *__restrict az,
+                                                   const float *__restrict aw,
+                                                   float *__restrict ox,
+                                                   float *__restrict oy,
+                                                   float *__restrict oz,
+                                                   float *__restrict ow,
+                                                   size_t n)
+{
+    size_t i = 0;
+#if FV_I_INTRINSICS
+    if (__builtin_cpu_supports("avx2") != 0) {
+        size_t bulk = n & ~(size_t)7;
+        if (bulk != 0) {
+            fv_i_vec4_norm_fast_avx2(ax, ay, az, aw, ox, oy, oz, ow, bulk);
+        }
+        i = bulk;
+    }
+#endif
+    for (; i < n; ++i) {
+        fv_real len2 = ((ax[i] * ax[i] + ay[i] * ay[i]) + az[i] * az[i]) + aw[i] * aw[i];
+        if (len2 <= FV_EPS_SQR) {
+            ox[i] = (fv_real)0;
+            oy[i] = (fv_real)0;
+            oz[i] = (fv_real)0;
+            ow[i] = (fv_real)0;
+        } else {
+            fv_real inv = (fv_real)1 / sqrtf(len2);
+            ox[i] = ax[i] * inv;
+            oy[i] = ay[i] * inv;
+            oz[i] = az[i] * inv;
+            ow[i] = aw[i] * inv;
+        }
+    }
+}
+
+static inline void fv_i_quat_normalize_soa_fast(                                                   const float *__restrict ax,
+                                                   const float *__restrict ay,
+                                                   const float *__restrict az,
+                                                   const float *__restrict aw,
+                                                   float *__restrict ox,
+                                                   float *__restrict oy,
+                                                   float *__restrict oz,
+                                                   float *__restrict ow,
+                                                   size_t n)
+{
+    size_t i = 0;
+#if FV_I_INTRINSICS
+    if (__builtin_cpu_supports("avx2") != 0) {
+        size_t bulk = n & ~(size_t)7;
+        if (bulk != 0) {
+            fv_i_quat_norm_fast_avx2(ax, ay, az, aw, ox, oy, oz, ow, bulk);
+        }
+        i = bulk;
+    }
+#endif
+    for (; i < n; ++i) {
+        fv_real len2 = ((ax[i] * ax[i] + ay[i] * ay[i]) + az[i] * az[i]) + aw[i] * aw[i];
+        if (len2 <= FV_EPS_SQR) {
+            ox[i] = (fv_real)0;
+            oy[i] = (fv_real)0;
+            oz[i] = (fv_real)0;
+            ow[i] = (fv_real)1;
+        } else {
+            fv_real inv = (fv_real)1 / sqrtf(len2);
+            ox[i] = ax[i] * inv;
+            oy[i] = ay[i] * inv;
+            oz[i] = az[i] * inv;
+            ow[i] = aw[i] * inv;
+        }
+    }
+}
+
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options
 #endif
@@ -4816,6 +5343,108 @@ static inline void fv_mat3_transform_vec3_soa(const float *__restrict m00,
 {
     fv_i_mat3_transform_vec3_soa(m00, m01, m02, m10, m11, m12, m20, m21, m22,
                                  vx, vy, vz, ox, oy, oz, n);
+}
+
+static inline void fv_mat3_mul_soa(                                   const float *__restrict a00,
+                                   const float *__restrict a01,
+                                   const float *__restrict a02,
+                                   const float *__restrict a10,
+                                   const float *__restrict a11,
+                                   const float *__restrict a12,
+                                   const float *__restrict a20,
+                                   const float *__restrict a21,
+                                   const float *__restrict a22,
+                                   const float *__restrict b00,
+                                   const float *__restrict b01,
+                                   const float *__restrict b02,
+                                   const float *__restrict b10,
+                                   const float *__restrict b11,
+                                   const float *__restrict b12,
+                                   const float *__restrict b20,
+                                   const float *__restrict b21,
+                                   const float *__restrict b22,
+                                   float *__restrict o00,
+                                   float *__restrict o01,
+                                   float *__restrict o02,
+                                   float *__restrict o10,
+                                   float *__restrict o11,
+                                   float *__restrict o12,
+                                   float *__restrict o20,
+                                   float *__restrict o21,
+                                   float *__restrict o22,
+                                   size_t n)
+{
+    fv_i_mat3_mul_soa(a00, a01, a02, a10, a11, a12, a20, a21, a22, b00, b01, b02, b10, b11, b12, b20, b21, b22, o00, o01, o02, o10, o11, o12, o20, o21, o22, n);
+}
+
+
+static inline void fv_mat3_inverse_soa(                                       const float *__restrict m00,
+                                       const float *__restrict m01,
+                                       const float *__restrict m02,
+                                       const float *__restrict m10,
+                                       const float *__restrict m11,
+                                       const float *__restrict m12,
+                                       const float *__restrict m20,
+                                       const float *__restrict m21,
+                                       const float *__restrict m22,
+                                       float *__restrict o00,
+                                       float *__restrict o01,
+                                       float *__restrict o02,
+                                       float *__restrict o10,
+                                       float *__restrict o11,
+                                       float *__restrict o12,
+                                       float *__restrict o20,
+                                       float *__restrict o21,
+                                       float *__restrict o22,
+                                       size_t n)
+{
+    fv_i_mat3_inverse_soa(m00, m01, m02, m10, m11, m12, m20, m21, m22, o00, o01, o02, o10, o11, o12, o20, o21, o22, n);
+}
+
+static inline void fv_vec2_normalize_soa_fast(                                const float *__restrict ax,
+                                const float *__restrict ay,
+                                float *__restrict ox,
+                                float *__restrict oy,
+                                size_t n)
+{
+    fv_i_vec2_normalize_soa_fast(ax, ay, ox, oy, n);
+}
+
+static inline void fv_vec3_normalize_soa_fast(                                const float *__restrict ax,
+                                const float *__restrict ay,
+                                const float *__restrict az,
+                                float *__restrict ox,
+                                float *__restrict oy,
+                                float *__restrict oz,
+                                size_t n)
+{
+    fv_i_vec3_normalize_soa_fast(ax, ay, az, ox, oy, oz, n);
+}
+
+static inline void fv_vec4_normalize_soa_fast(                                const float *__restrict ax,
+                                const float *__restrict ay,
+                                const float *__restrict az,
+                                const float *__restrict aw,
+                                float *__restrict ox,
+                                float *__restrict oy,
+                                float *__restrict oz,
+                                float *__restrict ow,
+                                size_t n)
+{
+    fv_i_vec4_normalize_soa_fast(ax, ay, az, aw, ox, oy, oz, ow, n);
+}
+
+static inline void fv_quat_normalize_soa_fast(                                const float *__restrict ax,
+                                const float *__restrict ay,
+                                const float *__restrict az,
+                                const float *__restrict aw,
+                                float *__restrict ox,
+                                float *__restrict oy,
+                                float *__restrict oz,
+                                float *__restrict ow,
+                                size_t n)
+{
+    fv_i_quat_normalize_soa_fast(ax, ay, az, aw, ox, oy, oz, ow, n);
 }
 
 #endif /* !FV_BUILD: public names of the default form */

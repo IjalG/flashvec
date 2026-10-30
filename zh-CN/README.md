@@ -137,22 +137,28 @@ void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_v
 
 这个选择必须由调用方做，库不会自动切换。
 
-## 物理原语（P6）
+## 物理原语（P6 / P7）
 
-向量层之上的第一组领域类型：旋转 `fv_quat` 与 3x3 线性代数 `fv_mat3`。四元数不是 `fv_vec4`：乘法是不可交换的复合，零不是旋转，批量布局是四个分量数组。
+向量层之上的领域类型：旋转 `fv_quat`、3x3 线性代数 `fv_mat3`，以及既有 `fv_mat4` 上的通用 4x4 运算。四元数不是 `fv_vec4`：乘法是不可交换的复合，零不是旋转，批量布局是四个分量数组。
 
 | 类型 | 大小 | 说明 |
 |---|---|---|
 | `fv_quat` | 16 B | `x/y/z/w`，单位元 `(0,0,0,1)`；与 `fv_vec4` 布局兼容但是不同类型 |
 | `fv_mat3` | 36 B | 行主序 `m[row*3+col]`，与 `fv_mat4` 同约定（与 GLM 相反），9 float 紧凑无 padding |
 
-标量 API：`fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / inverse / mul / rotate_vec3`；`fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat / determinant / inverse / inverse_checked`。`fv_quat_mul(a,b)` 是 `a*b`，先作用 `b` 再作用 `a`；`fv_quat_normalize` 对长度 <= `FV_EPS` 返回单位元（不是零），这是与向量 normalize 唯一的有意差异；`rotate_vec3` 与 `from_quat` 假定 `q` 是单位四元数，不自动归一化。
+标量 API：`fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / inverse / mul / rotate_vec3 / nlerp / slerp / from_axis_angle / from_euler_xyz`；`fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat / from_mat3 / determinant / inverse / inverse_checked`；`fv_mat4_mul / fv_mat4_inverse / fv_mat4_inverse_checked`；`fv_atan_approx`。
+
+`fv_quat_mul(a,b)` 是 `a*b`，先作用 `b` 再作用 `a`；`fv_quat_normalize` 对长度 <= `FV_EPS` 返回单位元（不是零），这是与向量 normalize 唯一的有意差异；`rotate_vec3` 与 `from_quat` 假定 `q` 是单位四元数，不自动归一化。
 
 `fv_quat_inverse` 是一般逆 `conjugate(q) / |q|²`（单位四元数下等于共轭）；长度 <= `FV_EPS` 返回**零**四元数而不是单位元——逆不存在，零是信号。`fv_mat3_inverse` 是伴随矩阵 / 行列式；当 `|det| <= FV_EPS * max|entry|³`（相对阈值，所以 `1e-3 * I` 仍可逆）时视为奇异，按值版本返回零矩阵。`_checked` 版本返回 1 / 0，失败时写入零值；`fv_mat3_inverse_checked` 允许 `out == m`。
 
-批量（SoA，每 ymm 8 个元素）：`fv_quat_mul_soa`、`fv_quat_normalize_soa`、`fv_quat_rotate_vec3_soa`、`fv_mat3_transform_vec3_soa`。四个入口对任意 n 与尾长都与逐值 API 逐位一致，且在同一 `fp-contract=off` pragma 内；`make test-physics-fma` 用 `-march=native -mfma -ffp-contract=fast` 消费者验证，`vfmadd=0`。
+`fv_quat_nlerp` / `fv_quat_slerp` 走最短弧（dot 为负时先翻转第二个四元数），结果归一化，`t` 不截断；slerp 在 dot 接近 1 时回退到 nlerp。`fv_quat_from_axis_angle` 内部归一化轴（零轴返回单位元），`fv_quat_from_euler_xyz` 的顺序是先 X、再 Y、再 Z（`q = qz*qy*qx`）。这些入口用到 `sin/cos`，是精度有界、不可跨 libm 逐位复现的。
 
-实现：quat 乘 / 旋转、mat3 变换是 `target("avx2")` 里的纯 C，GCC 自动向量化成 256 位且零 shuffle（实测 40 / 40 / 21 条 AVX2 指令，0 个 `vpermps`/`vshufps`）；quat normalize 是编译器唯一没向量化的（保留 `sqrtss`/`divss` 与分支），因此单独写了 AVX2 内核（29 条 ymm）。其余不手写 intrinsic。
+`fv_quat_from_mat3` 用 Shepperd 的“最大对角分支”法，假定输入是旋转矩阵；`fv_mat4_mul` / `fv_mat4_inverse` 是**通用** 4x4 运算（不只仿射），逆用伴随矩阵 / 行列式闭式解，奇异阈值同样是相对的（`|det| <= FV_EPS * max|entry|⁴`），按值版本返回零矩阵，`fv_mat4_inverse_checked` 返回 1 / 0 且允许 `out == m`。
+
+批量（SoA，每 ymm 8 个元素）：`fv_quat_mul_soa`、`fv_quat_normalize_soa`、`fv_quat_rotate_vec3_soa`、`fv_mat3_transform_vec3_soa`、`fv_mat3_mul_soa`、`fv_mat3_inverse_soa`。前六个对任意 n 与尾长都与逐值 API 逐位一致；mat3 乘 / 逆是九路 gather/scatter，按设计保持标量循环，批量收益来自去掉跨 TU 调用边界。`fv_vec2/vec3/vec4_normalize_soa_fast` 与 `fv_quat_normalize_soa_fast` 是独立的近似族（`rsqrtps` + 一次牛顿迭代，约 1–2 ulp，标量回退用精确 `1/sqrtf`），不承诺与精确入口逐位一致。
+
+实现：quat 乘 / 旋转、mat3 变换是 `target("avx2")` 里的纯 C，GCC 自动向量化成 256 位且零 shuffle（实测 40 / 40 / 21 条 AVX2 指令，0 个 `vpermps`/`vshufps`）；quat normalize 是编译器唯一没向量化的（保留 `sqrtss`/`divss` 与分支），因此单独写了 AVX2 内核（29 条 ymm）。`_fast` 族用 `rsqrtps` + 一次牛顿迭代；`fv_atan_approx` 是 `[-1,1]` 上的 5 项多项式（最大绝对误差约 1.2e-5，域外返回 NaN）。
 
 初步测量（`make bench-physics`，同进程交错 A/B，11 轮配对，`taskset -c 0`，两次运行中位数；A/A 地板 8192 约 0.99–1.00、1M 约 0.93–1.07）：
 
@@ -160,7 +166,7 @@ void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_v
 |---|---|---|
 | `fv_quat_mul_soa` | 18.0–19.5x | 2.39–2.51x |
 | `fv_quat_normalize_soa` | 41.9–42.3x | 4.56–5.13x |
-| `fv_quat_rotate_vec3_soa` | 25.8x | 3.39–3.72x |
+| `fv_quat_rotate_vec3_soa` | 25.8x | 3.39–3.57x |
 | `fv_mat3_transform_vec3_soa` | 24.7–25.1x | 3.33–3.80x |
 
 基线是逐元素库调用（跨 TU、不可内联）。这些是初步数据，尚未走五条验收标准。
@@ -176,9 +182,10 @@ void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_v
 - `normalize_soa`
 - 融合管线 `madd_normalize_soa` 与 `scale_soa` → `add_soa` → `normalize_soa` 三次调用
 - `addmul` / `maddv` 与对应逐值形态
+- `fv_quat_mul_soa` / `normalize_soa` / `rotate_vec3_soa`，`fv_mat3_transform_vec3_soa` / `mul_soa` / `inverse_soa` 与对应逐值形态
 - `_stream` 系列与对应非 stream 版本
 
-实现上只用 `vaddps`、`vsubps`、`vmulps`、`vdivps`、`vsqrtps`，不用 FMA，不用倒数近似，归约顺序与标量一致。
+实现上只用 `vaddps`、`vsubps`、`vmulps`、`vdivps`、`vsqrtps`，不用 FMA，不用倒数近似，归约顺序与标量一致。`_fast` 入口与 `fv_atan_approx` 是**独立的近似族**，不在上面的逐位承诺内，不能混用。
 
 ### 唯一的例外：`dot_soa`
 
@@ -325,12 +332,36 @@ N = 8192，每数组 32 KB，L2 驻留：
 
 原因在流量账上。就地写之前目标数组已经被读过，对应的 cache line 本来就在 cache 里，普通 store 这时不产生 RFO。所以「就地」省掉的是 0 B，不是 8 B/元素。它的价值是形态：省掉一块输出缓冲，不是速度。
 
+### 三维 / 四维绝对加速比
+
+`make bench-vec34`，同进程交错 A/B，11 轮配对，`taskset -c 0`，单次运行；基线是逐元素库调用：
+
+| 入口 | n = 8192 | n = 1M |
+|---|---|---|
+| `fv_vec3_add_soa` | 8.8x | 2.16x |
+| `fv_vec3_scale_soa` | 13.9x | 1.43x |
+| `fv_vec3_normalize_soa` | 10.1x | 2.11x |
+| `fv_vec4_add_x2` | 35.2x | 2.53x |
+| `fv_vec4_scale_x2` | 25.3x | 2.05x |
+| `fv_vec4_normalize_soa` | 38.8x | 4.34x |
+
+### `_fast` normalize
+
+`make bench-fast`，同样协议；A = `_fast`，B = 精确 SoA，speedup = exact/fast：
+
+| 入口 | n = 8192 | n = 1M |
+|---|---|---|
+| `fv_vec2_normalize_soa_fast` | 1.125x | 1.03x |
+| `fv_vec3_normalize_soa_fast` | 1.054x | 1.04x |
+
+8192 档的 A/A 地板为 0.995–0.997；1M 档为 0.89–1.08，所以 1M 的 1.03–1.04x 落在噪声带内，只能读作“没有变慢”，不能当作确定的加速。
+
 ### 读这些数字时要注意
 
-- 加速比必须连同工作集大小一起报。N = 1<<20（24 MB）时三档全部收敛到 1.0–1.5x，因为都受限于本机 6–7 GB/s 的流带宽。
+- 加速比必须连同工作集大小一起报。N = 1<<20（24 MB）时三档实现收敛到 1.0–1.5x，因为都受限于本机 6–7 GB/s 的流带宽；批量相对标量的比值会更大，因为那个基线是跨 TU 调用，见上面的三维 / 四维表。
 - 收益主要来自消除跨 TU 调用边界，不是 intrinsics。同一份数学放进头文件内联后，`-O3 -march=native` 的自动向量化几乎追平手写 AVX2。
 - 这台机器长期有外部负载，同一份代码跨运行可差 20–25%。不同夹具的绝对值不要直接比，只看同一次运行内的比值。
-- 三维与四维批量相对标量的加速比尚未测量，不要引用成数字。本轮只测了它们的形态差：65 个点里 5 通过、8 变慢、52 无法判定，读数散布在 0.97–1.93 之间。
+- 三维 / 四维批量的绝对加速比现在由 `make bench-vec34` 测量（见上表）；引用时带上 harness 与工作集，不要当成单点精确倍数。
 
 判定标准见 `docs/acceptance-protocol.md`。原始判定表在 `docs/research/raw/ab_campaign_verdict.txt`，每次 `make run` 会覆盖，引用时请连同时刻。
 
@@ -338,7 +369,7 @@ N = 8192，每数组 32 KB，L2 驻留：
 
 ```bash
 make                         # build/libflashvec.a
-make test-all                # 30 + 57 + 1098 条断言 + 两个 C 兼容性测试
+make test-all                # 全量套件：1.86M 项检查（tests/count_checks.sh 可复算）
 
 make test-header             # 严格编译档 + 双重包含
 make test-inline             # 默认形态 vs FV_USE_EXTERN 形态逐字节对拍
@@ -349,7 +380,11 @@ make test-physics            # 四元数 + mat3，全形态（C/C++ inline/exter
 make test-quat               # 四元数标量语义 + SoA 批量逐位一致
 make test-mat3               # 3x3 标量语义 + SoA 批量逐位一致
 make test-physics-c          # 纯 C11 翻译单元下的同一契约
+make test-mat4-ops           # 通用 4x4 乘法 / 求逆
+make test-fast               # _fast normalize 精度 + fv_atan_approx
 make bench-physics           # 逐元素调用 vs SoA 批量，同进程 A/B
+make bench-fast              # 精确 vs _fast normalize
+make bench-vec34             # 三维 / 四维相对标量调用的绝对加速比
 make test-vec4               # 四维标量与批量
 make test-vec34-inline       # 三维/四维批量形态对拍
 make test-refactor           # 以上全部 + 导出符号清单 + 反汇编普查
@@ -390,14 +425,10 @@ AVX2 只在头文件里用函数级 `target("avx2")` 属性加运行时 `__built
 结果是这部分入口（`lerp`、`madd`、`dot`、`len`、`normalize`）在消费者的默认选项下每批多一次 TU 内调用，其余八个入口可以完整内联。
 `make test-inline-effects` 把这个契约钉成了可复现的断言。
 
-## 还没做
+## 范围
 
-- `_fast` 变体，例如 `rsqrtps` 加一次牛顿迭代的 normalize，约 2 ulp 误差，约快 10%。必须作为新函数提供，不能改默认语义。
-- 近似三角函数。`atan` 多项式约比 glibc 快 2.7 倍，但必须写明输入域。
-- 四元数插值（slerp / 最短弧 lerp）、轴角与欧拉角构造：需要 sin/cos 与输入域契约，是单独的设计决定。
-- `fv_mat4` 的完整运算（乘法 / 求逆）、从矩阵构造四元数、批量 `fv_mat3_mul`。
-- 三维与四维批量的绝对加速比测量。
+库现在覆盖了向量类型及其标量 / 批量 API、四元数、3x3 与通用 4x4 矩阵、四元数插值与角度构造、`_fast` 近似 normalize 族，以及 `fv_atan_approx`。本文档不再保留待办清单。
 
-已经做完、旧版这里写「留给以后」的：三维批量入口（走 SoA）、四维向量（`fv_vec4` 加 `_x2` 与 `_soa` 批量）、以及上面的 `fv_quat` / `fv_mat3` 物理原语。
+以下内容是**有意不做**（不是待办）：线程 / 调度等引擎设施、分配器或 arena 所有权（库从不分配）、双精度批量族、以及每个入口的 `_fast` 版本（目前只有 normalize）。这些会改变值语义 / 无分配契约，而不是补全它。
 
 更多分析见 `docs/optimization-report.md`。哪些方向已经实测过、结论是什么，见 `docs/acceptance-protocol.md` 的 §9。

@@ -37,6 +37,12 @@ static float g_m20[CAP], g_m21[CAP], g_m22[CAP];
 static float g_vx[CAP], g_vy[CAP], g_vz[CAP];
 static float g_ox[CAP], g_oy[CAP], g_oz[CAP];
 
+/* 9 x CAP component planes for the batch mul / inverse. */
+static float g_a[9][CAP];
+static float g_b[9][CAP];
+static float g_om[9][CAP];
+static float g_oi[9][CAP];
+
 static int feq(fv_real a, fv_real b, fv_real eps)
 {
     fv_real d = a - b;
@@ -378,6 +384,100 @@ static void test_inverse(void)
     }
 }
 
+static void poison_planes(float p[9][CAP])
+{
+    int k;
+    size_t i;
+    for (k = 0; k < 9; ++k) {
+        for (i = 0; i < CAP; ++i) {
+            p[k][i] = 1.0e30f;
+        }
+    }
+}
+
+static int planes_guard_ok(float p[9][CAP], size_t from)
+{
+    int k;
+    size_t i;
+    for (k = 0; k < 9; ++k) {
+        for (i = from; i < CAP; ++i) {
+            if (p[k][i] != 1.0e30f) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+static void fill_planes(size_t n)
+{
+    size_t i;
+    int k;
+    for (k = 0; k < 9; ++k) {
+        for (i = 0; i < n; ++i) {
+            g_a[k][i] = rnd_moderate();
+            g_b[k][i] = rnd_moderate();
+        }
+    }
+}
+
+static void test_batch_mul(size_t n)
+{
+    size_t i;
+    int k;
+    fill_planes(n);
+    /* mul does not have a singular path; all entries are finite random values. */
+    poison_planes(g_om);
+    fv_mat3_mul_soa(g_a[0], g_a[1], g_a[2], g_a[3], g_a[4], g_a[5], g_a[6], g_a[7], g_a[8],
+                    g_b[0], g_b[1], g_b[2], g_b[3], g_b[4], g_b[5], g_b[6], g_b[7], g_b[8],
+                    g_om[0], g_om[1], g_om[2], g_om[3], g_om[4], g_om[5], g_om[6], g_om[7],
+                    g_om[8], n);
+    for (i = 0; i < n; ++i) {
+        fv_mat3 a;
+        fv_mat3 b;
+        fv_mat3 want;
+        for (k = 0; k < 9; ++k) {
+            a.m[k] = g_a[k][i];
+            b.m[k] = g_b[k][i];
+        }
+        want = fv_mat3_mul(&a, &b);
+        for (k = 0; k < 9; ++k) {
+            CHECK(g_om[k][i] == want.m[k]);
+        }
+    }
+    CHECK(planes_guard_ok(g_om, n));
+}
+
+static void test_batch_inverse(size_t n)
+{
+    size_t i;
+    int k;
+    fill_planes(n);
+    /* Every 11th lane is the zero matrix: the batch must take the same singular path as the scalar
+     * function and write nine zeros. */
+    for (i = 0; i < n; i += 11) {
+        for (k = 0; k < 9; ++k) {
+            g_a[k][i] = 0.0f;
+        }
+    }
+    poison_planes(g_oi);
+    fv_mat3_inverse_soa(g_a[0], g_a[1], g_a[2], g_a[3], g_a[4], g_a[5], g_a[6], g_a[7], g_a[8],
+                        g_oi[0], g_oi[1], g_oi[2], g_oi[3], g_oi[4], g_oi[5], g_oi[6], g_oi[7],
+                        g_oi[8], n);
+    for (i = 0; i < n; ++i) {
+        fv_mat3 a;
+        fv_mat3 want;
+        for (k = 0; k < 9; ++k) {
+            a.m[k] = g_a[k][i];
+        }
+        want = fv_mat3_inverse(&a);
+        for (k = 0; k < 9; ++k) {
+            CHECK(g_oi[k][i] == want.m[k]);
+        }
+    }
+    CHECK(planes_guard_ok(g_oi, n));
+}
+
 static void fill_case(size_t n)
 {
     size_t i;
@@ -427,12 +527,27 @@ int main(void)
     test_batch(63);
     test_batch(1024);
     test_batch(4097);
+    test_batch_mul(0);
+    test_batch_mul(63);
+    test_batch_mul(1024);
+    test_batch_mul(4097);
+    test_batch_inverse(0);
+    test_batch_inverse(63);
+    test_batch_inverse(1024);
+    test_batch_inverse(4097);
     for (n = 0; n <= 40; ++n) {
         test_batch(n);
+        test_batch_mul(n);
+        test_batch_inverse(n);
     }
 
     fv_mat3_transform_vec3_soa(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                                NULL, NULL, NULL, NULL, NULL, NULL, 0);
+    fv_mat3_mul_soa(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
+    fv_mat3_inverse_soa(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
 
     printf("test_mat3: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -400,7 +400,99 @@ static void test_inverse(void)
     }
 }
 
-/* ------------------------------------------------------------------ 6. SoA batch parity */
+/* ------------------------------------------------------------------ 6. matrix -> quaternion */
+
+static void test_from_mat3(void)
+{
+    fv_mat3 idm = fv_mat3_identity();
+    fv_quat qi = fv_quat_from_mat3(&idm);
+    int k;
+
+    CHECK(quat_near(qi, fv_quat_identity(), (fv_real)1e-6));
+
+    /* A known 90-degree rotation about +y: the round trip is the same rotation (q or -q). */
+    {
+        fv_quat qy = fv_quat_make(0, 0.70710677f, 0, 0.70710677f);
+        fv_mat3 m = fv_mat3_from_quat(qy);
+        fv_quat q2 = fv_quat_from_mat3(&m);
+        CHECK(quat_near(q2, qy, (fv_real)2e-6) ||
+              quat_near(q2, fv_quat_neg(qy), (fv_real)2e-6));
+    }
+
+    /* Random unit quaternions: q -> R -> q' is the same rotation, and q' is unit length. */
+    for (k = 0; k < 2000; ++k) {
+        fv_quat q = fv_quat_normalize(fv_quat_make(rnd_moderate(), rnd_moderate(),
+                                                   rnd_moderate(), rnd_moderate()));
+        fv_mat3 m = fv_mat3_from_quat(q);
+        fv_quat q2 = fv_quat_from_mat3(&m);
+        CHECK(feq(fv_quat_len(q2), (fv_real)1, (fv_real)1e-5));
+        CHECK(quat_near(q2, q, (fv_real)2e-5) ||
+              quat_near(q2, fv_quat_neg(q), (fv_real)2e-5));
+    }
+}
+
+/* ------------------------------------------------------------------ 7. interpolation / construction */
+
+static void test_interpolation(void)
+{
+    const fv_real pi = (fv_real)3.14159265358979323846;
+    fv_quat id = fv_quat_identity();
+    fv_quat qy90 = fv_quat_from_axis_angle(fv_vec3_make(0, 1, 0), pi / (fv_real)2);
+    fv_quat qz90 = fv_quat_from_axis_angle(fv_vec3_make(0, 0, 1), pi / (fv_real)2);
+    fv_quat q;
+    fv_vec3 v = fv_vec3_make(1, 0, 0);
+    fv_vec3 r;
+    int k;
+
+    /* Endpoints. */
+    CHECK(quat_near(fv_quat_nlerp(id, qy90, 0), id, (fv_real)1e-6));
+    CHECK(quat_near(fv_quat_nlerp(id, qy90, 1), qy90, (fv_real)1e-6));
+    CHECK(quat_near(fv_quat_slerp(id, qy90, 0), id, (fv_real)1e-6));
+    CHECK(quat_near(fv_quat_slerp(id, qy90, 1), qy90, (fv_real)1e-6));
+
+    /* Midpoint of a 90-degree turn is a 45-degree turn. */
+    q = fv_quat_slerp(id, qy90, (fv_real)0.5);
+    CHECK(feq(fv_quat_len(q), (fv_real)1, (fv_real)1e-6));
+    r = fv_quat_rotate_vec3(q, v);
+    CHECK(vec3_near(r, fv_vec3_make(0.70710677f, 0, -0.70710677f), (fv_real)2e-6));
+    q = fv_quat_nlerp(id, qy90, (fv_real)0.5);
+    CHECK(vec3_near(fv_quat_rotate_vec3(q, v), r, (fv_real)2e-4));
+
+    /* Shortest arc: q and -q describe the same rotation, so interpolation stays at q (up to sign). */
+    {
+        fv_quat nq = fv_quat_neg(qy90);
+        fv_quat a = fv_quat_slerp(qy90, nq, (fv_real)0.25);
+        fv_quat b = fv_quat_nlerp(qy90, nq, (fv_real)0.25);
+        CHECK(quat_near(a, qy90, (fv_real)1e-5) || quat_near(a, nq, (fv_real)1e-5));
+        CHECK(quat_near(b, qy90, (fv_real)1e-5) || quat_near(b, nq, (fv_real)1e-5));
+    }
+
+    /* Unit length over a t sweep between two different rotations. */
+    for (k = 0; k <= 10; ++k) {
+        fv_real t = (fv_real)k / (fv_real)10;
+        CHECK(feq(fv_quat_len(fv_quat_slerp(qy90, qz90, t)), (fv_real)1, (fv_real)2e-6));
+        CHECK(feq(fv_quat_len(fv_quat_nlerp(qy90, qz90, t)), (fv_real)1, (fv_real)2e-6));
+    }
+
+    /* Axis-angle: zero axis -> identity; a non-unit axis is normalized. */
+    CHECK(quat_near(fv_quat_from_axis_angle(fv_vec3_make(0, 0, 0), pi), id, (fv_real)1e-6));
+    CHECK(quat_near(fv_quat_from_axis_angle(fv_vec3_make(0, 2, 0), pi / (fv_real)2),
+                    qy90, (fv_real)2e-6));
+
+    /* Euler XYZ: a single-axis rotation matches the axis-angle constructor; the composition order is
+     * X first, then Y, then Z. */
+    CHECK(quat_near(fv_quat_from_euler_xyz(0, pi / (fv_real)2, 0), qy90, (fv_real)2e-6));
+    {
+        fv_quat qx90 = fv_quat_from_axis_angle(fv_vec3_make(1, 0, 0), pi / (fv_real)2);
+        CHECK(quat_near(fv_quat_from_euler_xyz(pi / (fv_real)2, 0, 0), qx90, (fv_real)2e-6));
+        /* (0,1,0) under X then Y: X sends it to (0,0,1), Y sends that to (1,0,0). */
+        q = fv_quat_from_euler_xyz(pi / (fv_real)2, pi / (fv_real)2, 0);
+        r = fv_quat_rotate_vec3(q, fv_vec3_make(0, 1, 0));
+        CHECK(vec3_near(r, fv_vec3_make(1, 0, 0), (fv_real)2e-6));
+    }
+}
+
+/* ------------------------------------------------------------------ 8. SoA batch parity */
 
 static void fill_case(size_t n)
 {
@@ -496,6 +588,8 @@ int main(void)
     test_normalize();
     test_rotate();
     test_inverse();
+    test_from_mat3();
+    test_interpolation();
 
     printf("== fv_quat SoA batch: bit-identical to the per-value API (n = 0..40 all tails + 63 + 1024 + 4097) ==\n");
     test_batch_mul(0);

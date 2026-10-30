@@ -137,3 +137,110 @@ fv_vec3 fv_quat_rotate_vec3(fv_quat q, fv_vec3 v)
     r.z = (v.z + q.w * tz) + dz;
     return r;
 }
+
+/* Rotation matrix -> unit quaternion, Shepperd's method: pick the largest of the four diagonal
+ * expressions so the divisor is the largest one (the naive trace-only form loses precision when
+ * trace is near -1). The matrix is assumed to be a rotation (orthonormal, det +1); the result is
+ * normalized. For a non-rotation this still returns a unit quaternion, but not the matrix's rotation,
+ * and the by-value API has no error channel to report that. */
+fv_quat fv_quat_from_mat3(const fv_mat3 *m)
+{
+    fv_real trace = m->m[0] + m->m[4] + m->m[8];
+    fv_quat q;
+    if (trace > (fv_real)0) {
+        fv_real s = sqrtf(trace + (fv_real)1) * (fv_real)2;
+        q.w = (fv_real)0.25 * s;
+        q.x = (m->m[7] - m->m[5]) / s;
+        q.y = (m->m[2] - m->m[6]) / s;
+        q.z = (m->m[3] - m->m[1]) / s;
+    } else if (m->m[0] > m->m[4] && m->m[0] > m->m[8]) {
+        fv_real s = sqrtf((fv_real)1 + m->m[0] - m->m[4] - m->m[8]) * (fv_real)2;
+        q.w = (m->m[7] - m->m[5]) / s;
+        q.x = (fv_real)0.25 * s;
+        q.y = (m->m[1] + m->m[3]) / s;
+        q.z = (m->m[2] + m->m[6]) / s;
+    } else if (m->m[4] > m->m[8]) {
+        fv_real s = sqrtf((fv_real)1 + m->m[4] - m->m[0] - m->m[8]) * (fv_real)2;
+        q.w = (m->m[2] - m->m[6]) / s;
+        q.x = (m->m[1] + m->m[3]) / s;
+        q.y = (fv_real)0.25 * s;
+        q.z = (m->m[5] + m->m[7]) / s;
+    } else {
+        fv_real s = sqrtf((fv_real)1 + m->m[8] - m->m[0] - m->m[4]) * (fv_real)2;
+        q.w = (m->m[3] - m->m[1]) / s;
+        q.x = (m->m[2] + m->m[6]) / s;
+        q.y = (m->m[5] + m->m[7]) / s;
+        q.z = (fv_real)0.25 * s;
+    }
+    return fv_quat_normalize(q);
+}
+
+/* Shortest-arc normalized lerp: negating the second quaternion when dot < 0 selects the same rotation
+ * with the closer sign, then the components are interpolated and normalized. */
+fv_quat fv_quat_nlerp(fv_quat a, fv_quat b, fv_real t)
+{
+    if (fv_quat_dot(a, b) < (fv_real)0) {
+        b = fv_quat_neg(b);
+    }
+    {
+        fv_quat r;
+        r.x = a.x + (b.x - a.x) * t;
+        r.y = a.y + (b.y - a.y) * t;
+        r.z = a.z + (b.z - a.z) * t;
+        r.w = a.w + (b.w - a.w) * t;
+        return fv_quat_normalize(r);
+    }
+}
+
+/* Shortest-arc slerp. The small-angle threshold (dot > 0.9995) keeps sin(theta) away from underflow and
+ * hands the near-identical case to nlerp, which is stable there. */
+fv_quat fv_quat_slerp(fv_quat a, fv_quat b, fv_real t)
+{
+    fv_real d = fv_quat_dot(a, b);
+    if (d < (fv_real)0) {
+        b = fv_quat_neg(b);
+        d = -d;
+    }
+    if (d > (fv_real)0.9995 || !(d < (fv_real)1)) {
+        return fv_quat_nlerp(a, b, t);
+    }
+    {
+        fv_real theta = acosf(d);
+        fv_real st = sinf(theta);
+        if (st == (fv_real)0) {
+            return fv_quat_nlerp(a, b, t);
+        }
+        {
+            fv_real w1 = sinf((fv_real)(1 - t) * theta) / st;
+            fv_real w2 = sinf(t * theta) / st;
+            fv_quat r = fv_quat_add(fv_quat_scale(a, w1), fv_quat_scale(b, w2));
+            return fv_quat_normalize(r);
+        }
+    }
+}
+
+/* Axis-angle: normalize the axis first (a zero axis has no direction and returns the identity), then
+ * the half-angle sine/cosine. */
+fv_quat fv_quat_from_axis_angle(fv_vec3 axis, fv_real angle)
+{
+    fv_real len = fv_vec3_len(axis);
+    if (len <= FV_EPS) {
+        return fv_quat_identity();
+    }
+    {
+        fv_real inv = (fv_real)1 / len;
+        fv_real half = angle * (fv_real)0.5;
+        fv_real s = sinf(half);
+        fv_real c = cosf(half);
+        return fv_quat_make(axis.x * inv * s, axis.y * inv * s, axis.z * inv * s, c);
+    }
+}
+
+/* Euler XYZ, applied X first, then Y, then Z: q = qz * qy * qx. */
+fv_quat fv_quat_from_euler_xyz(fv_real x, fv_real y, fv_real z)
+{
+    fv_quat qx = fv_quat_from_axis_angle(fv_vec3_make((fv_real)1, (fv_real)0, (fv_real)0), x);
+    fv_quat qy = fv_quat_from_axis_angle(fv_vec3_make((fv_real)0, (fv_real)1, (fv_real)0), y);
+    fv_quat qz = fv_quat_from_axis_angle(fv_vec3_make((fv_real)0, (fv_real)0, (fv_real)1), z);
+    return fv_quat_mul(qz, fv_quat_mul(qy, qx));
+}

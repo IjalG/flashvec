@@ -59,8 +59,9 @@ header.
 number in a name is how many elements fit in one 256-bit register: four `fv_vec2` (`_x4`) or
 two `fv_vec4` (`_x2`). Both fill the register completely, so no lane is wasted.
 
-The P6 physics group adds four SoA entries on top of that: quaternion multiply, normalize and
-rotate-vector, plus the 3x3 transform. They are documented under [Physics primitives](#physics-primitives).
+The P6 physics group adds four SoA entries on top of that (quaternion multiply, normalize and
+rotate-vector, plus the 3x3 transform), and P7 adds two mat3 batch entries (multiply / inverse) and
+four `_fast` normalize entries. They are documented under [Physics primitives](#physics-primitives).
 
 19 of the 52 are `_stream` variants of an operation already in the list, differing only in the
 store instruction; see [Streaming stores](#streaming-stores).
@@ -157,10 +158,10 @@ The library will never switch to them on its own; the choice belongs to the call
 
 ## Physics primitives
 
-The first domain types on top of the vector layer: rotation (`fv_quat`) and 3x3 linear algebra
-(`fv_mat3`). They are a separate group because a quaternion is not a `fv_vec4` -- its product is a
-non-commutative composition, its zero is not a rotation, and its batch form needs four component
-arrays rather than the vector layout.
+The domain types on top of the vector layer: rotation (`fv_quat`), 3x3 linear algebra (`fv_mat3`),
+and the general 4x4 operations on the existing `fv_mat4`. The quaternion is a separate type because it
+is not a `fv_vec4` -- its product is a non-commutative composition, its zero is not a rotation, and its
+batch form needs four component arrays rather than the vector layout.
 
 ### Types
 
@@ -182,11 +183,24 @@ zero is the signal. `fv_mat3_inverse` is the adjugate / determinant; a matrix is
 form then returns the zero matrix. The `_checked` forms return 1 / 0 and write the zero value on failure;
 `fv_mat3_inverse_checked` accepts `out == m`.
 
+`fv_quat_nlerp` / `fv_quat_slerp` use the shortest-arc convention (a negative dot negates the second
+quaternion), normalize the result, and do not clamp `t`; slerp falls back to nlerp near dot = 1.
+`fv_quat_from_axis_angle` normalizes the axis (zero axis -> identity), and `fv_quat_from_euler_xyz`
+applies X first, then Y, then Z (`q = qz*qy*qx`). These use `sin/cos`, so they are accuracy-bounded, not
+bit-reproducible across libm implementations.
+
+`fv_quat_from_mat3` is Shepperd's branch-on-largest-diagonal conversion; it assumes a rotation matrix
+and returns a normalized quaternion. `fv_mat4_mul` / `fv_mat4_inverse` are the **general** 4x4
+operations (not affine-only); the inverse uses the adjugate/determinant closed form and the same
+scale-relative singularity rule (`|det| <= FV_EPS * max|entry|^4`), with the value form returning the
+zero matrix and `fv_mat4_inverse_checked` returning 1 / 0 (and allowing `out == m`).
+
 ### Scalar and batch API
 
 Scalar: `fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate /
-inverse / mul / rotate_vec3`; `fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat /
-determinant / inverse / inverse_checked`.
+inverse / mul / rotate_vec3 / nlerp / slerp / from_axis_angle / from_euler_xyz`;
+`fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat / from_mat3 / determinant / inverse /
+inverse_checked`; `fv_mat4_mul / fv_mat4_inverse / fv_mat4_inverse_checked`; `fv_atan_approx`.
 
 Batch (SoA, 8 elements per 256-bit register; a quaternion is four arrays, a 3x3 is nine):
 
@@ -194,8 +208,11 @@ Batch (SoA, 8 elements per 256-bit register; a quaternion is four arrays, a 3x3 
 - `fv_quat_normalize_soa` -- 4 input arrays, 4 outputs, `n`
 - `fv_quat_rotate_vec3_soa` -- 4 quaternion + 3 vector inputs, 3 outputs, `n`
 - `fv_mat3_transform_vec3_soa` -- 9 matrix + 3 vector inputs, 3 outputs, `n`
+- `fv_mat3_mul_soa` -- 9 + 9 matrix inputs, 9 outputs, `n`
+- `fv_mat3_inverse_soa` -- 9 matrix inputs, 9 outputs, `n` (singular lanes write nine zeros)
+- `fv_vec2/vec3/vec4_normalize_soa_fast`, `fv_quat_normalize_soa_fast` -- approximate `rsqrtps` family
 
-All four are **bit-identical** to their per-value counterparts for every `n` and every tail length,
+The first six are **bit-identical** to their per-value counterparts for every `n` and every tail length,
 inside the same `fp-contract=off` pragma: `make test-physics-fma` builds the consumer with
 `-march=native -mfma -ffp-contract=fast` and the batch output still matches the scalar one
 (`vfmadd = 0`). The usual NaN-payload exception applies; see the guarantees section.
@@ -204,8 +221,20 @@ Implementation note: quaternion multiply, rotate-vector and mat3 transform are *
 `target("avx2")` function -- GCC vectorizes them at 256 bits with zero shuffles (measured 40 / 40 / 21
 AVX2 instructions including loads and stores, 0 `vpermps`/`vshufps`). Quaternion normalize was the one
 loop the compiler refused to vectorize (it kept `sqrtss`/`divss` and a branch), so it has an explicit
-AVX2 kernel with a blend to the identity. No hand-written intrinsic is used anywhere else; the rule is
-the same as the rest of the library: hand-write only after the compiler fails.
+AVX2 kernel with a blend to the identity. The mat3 batch mul/inverse are gather/scatter loops by nature
+(nine streams each way), so they stay scalar; the batch form's win there is the removed call boundary.
+No hand-written intrinsic is used anywhere else; the rule is the same as the rest of the library:
+hand-write only after the compiler fails.
+
+### Approximate entries
+
+The `_fast` normalize family uses `rsqrtps` + one Newton-Raphson step: relative error about 1-2 ulp on
+AVX2, exact `1/sqrtf` on the scalar fallback, and the same zero guard as the exact entry (zeros, or the
+quaternion identity). It is a separate family and is **not** bit-identical to the exact entries. The
+measured gain is about 1.13x for `vec2` and 1.05x for `vec3` at n=8192; at n=1M it is 1.03-1.08x, i.e.
+inside the run's A/A spread, so read that tier as inconclusive. `fv_atan_approx` is the 5-term
+polynomial on `[-1,1]` (max abs error ~1.2e-5, NaN outside the domain); it is the intended fast path
+for angle comparisons, not a libm replacement.
 
 ### Preliminary measurements
 
@@ -238,11 +267,13 @@ The following entry points are guaranteed to match the corresponding scalar API 
 - the fused pipeline `madd_normalize_soa` against `scale_soa` then `add_soa` then `normalize_soa`
 - `addmul` and `maddv` against their per-value counterparts
 - `fv_quat_mul_soa` / `fv_quat_normalize_soa` / `fv_quat_rotate_vec3_soa` against the per-value quaternion API
-- `fv_mat3_transform_vec3_soa` against `fv_mat3_transform_vec3`
+- `fv_mat3_transform_vec3_soa` / `fv_mat3_mul_soa` / `fv_mat3_inverse_soa` against their per-value counterparts
 - every `_stream` function against its non-stream counterpart
 
 The implementation uses only `vaddps`, `vsubps`, `vmulps`, `vdivps` and `vsqrtps`. No FMA, no
-reciprocal approximations, and reduction order matches the scalar path.
+reciprocal approximations, and reduction order matches the scalar path. The `_fast` entries and
+`fv_atan_approx` are a **separate, explicitly approximate family**: they are not covered by the
+bit-for-bit list above and must not be mixed with it.
 
 ### The one exception: `dot_soa`
 
@@ -435,18 +466,48 @@ been read, so the cache line is already resident and an ordinary store triggers 
 ownership in that situation. In-place saves 0 B per element, not 8. Its value is shape: it removes
 an output buffer, not time.
 
+### 3D and 4D absolute speedup
+
+`make bench-vec34`, same-process interleaved A/B, 11 paired rounds, `taskset -c 0`, one run. Baseline
+is the per-element library call; the same-round A/A control sat at 0.97-1.00 at n=8192 and 0.98-1.06
+at n=1M (the `vec4_add` 8192 A/A spread was wider, 0.15-1.17, but the A/B ratio is 35x, far outside it).
+
+| Entry | n = 8192 | n = 1M |
+|---|---|---|
+| `fv_vec3_add_soa` | 8.8x | 2.16x |
+| `fv_vec3_scale_soa` | 13.9x | 1.43x |
+| `fv_vec3_normalize_soa` | 10.1x | 2.11x |
+| `fv_vec4_add_x2` | 35.2x | 2.53x |
+| `fv_vec4_scale_x2` | 25.3x | 2.05x |
+| `fv_vec4_normalize_soa` | 38.8x | 4.34x |
+
+These are the absolute speedups over scalar calls, so they answer the question the earlier document
+left open. At n=1M the working set is DRAM-bound and the ratios converge toward the memory ceiling.
+
+### `_fast` normalize
+
+`make bench-fast`, same protocol. A = `_fast`, B = exact SoA; speedup = exact/fast:
+
+| Entry | n = 8192 | n = 1M |
+|---|---|---|
+| `fv_vec2_normalize_soa_fast` | 1.125x | 1.03x |
+| `fv_vec3_normalize_soa_fast` | 1.054x | 1.04x |
+
+At n=8192 the A/A control was 0.995-0.997; at n=1M it was 0.89-1.08, so the 1M gains are inside the
+noise band and should be read as "no worse", not as a measured speedup.
+
 ### Reading these numbers
 
-- Always report the working set alongside a speedup. At N = 1<<20 (24 MB) all three implementations
-  converge to 1.0–1.5x, limited by this machine's 6–7 GB/s streaming bandwidth.
+- Always report the working set alongside a speedup. At N = 1<<20 (24 MB) the three implementation
+  tiers converge to 1.0–1.5x, limited by this machine's 6–7 GB/s streaming bandwidth. Batch-vs-scalar
+  ratios stay larger because that baseline is a cross-TU call, as the 3D/4D table above shows.
 - Most of the gain comes from removing cross-TU call boundaries, not from intrinsics. Once the same
   math is inlined from the header, `-O3 -march=native` auto-vectorization nearly matches hand-
   written AVX2.
 - This machine carries persistent external load, so the same code can vary 20–25% between runs.
   Never compare absolute values across fixtures; only ratios within one run are meaningful.
-- The absolute speedup of the 3D and 4D batch entries over scalar is not measured. Do not quote it.
-  This round measured only their shape difference: of 65 points, 5 passed, 8 were slower and 52
-  were inconclusive, with readings scattered between 0.97 and 1.93.
+- The 3D / 4D absolute speedups are now measured by `make bench-vec34` (table above); like every
+  ratio here, quote them with the harness and the working set, not as a single-point multiplier.
 
 The acceptance criteria are in `docs/acceptance-protocol.md`. The raw verdict table is
 `docs/research/raw/ab_campaign_verdict.txt`, which every `make run` overwrites, so quote it together
@@ -456,7 +517,7 @@ with its timestamp.
 
 ```bash
 make                         # build/libflashvec.a
-make test-all                # 30 + 57 + 1098 assertions + two C compatibility tests
+make test-all                # full suite: 1.86M checks (tests/count_checks.sh reproduces the total)
 
 make test-header             # strict compile settings + double inclusion
 make test-inline             # default form vs FV_USE_EXTERN form, byte for byte
@@ -467,7 +528,11 @@ make test-physics            # quat + mat3, all forms (C/C++ inline/extern/pure-
 make test-quat               # quaternion scalar semantics + SoA batch, bit-identical
 make test-mat3               # 3x3 scalar semantics + SoA batch, bit-identical
 make test-physics-c          # the same contract from a plain C11 translation unit
+make test-mat4-ops           # general 4x4 multiply / inverse
+make test-fast               # _fast normalize accuracy + fv_atan_approx
 make bench-physics           # per-element calls vs SoA batch, same-process A/B
+make bench-fast              # exact vs _fast normalize
+make bench-vec34             # 3D / 4D absolute speedup over scalar calls
 make test-vec4               # 4D scalar and batch
 make test-vec34-inline       # 3D/4D batch shape comparison
 make test-refactor           # all of the above plus symbol list and disassembly survey
@@ -521,21 +586,16 @@ The consequence is that these entry points (`lerp`, `madd`, `dot`, `len`, `norma
 extra translation-unit-local call per batch. The other eight inline completely. `make test-inline-
 effects` pins this contract down as a reproducible assertion.
 
-## Not done yet
+## Scope
 
-- `_fast` variants, for example a `rsqrtps` normalize with one Newton iteration, about 2 ulp of
-  error and roughly 10% faster. These must be new functions and must not change existing
-  semantics.
-- Approximate trigonometry. An `atan` polynomial runs about 2.7x faster than glibc, but the input
-  domain has to be documented.
-- Quaternion interpolation (slerp / shortest-arc lerp), axis-angle and Euler construction. They need
-  sin/cos and an input-domain contract, which is a separate design decision.
-- Full `fv_mat4` operations (multiply / inverse), quaternion-from-matrix, and a batch `fv_mat3_mul`.
-- Absolute speedup measurements for the 3D and 4D batch entries.
+The library now covers the vector types and their scalar / batch APIs, quaternions, 3x3 and general
+4x4 matrices, quaternion interpolation and angle constructors, the `_fast` approximate normalize
+family, and `fv_atan_approx`. There is no pending backlog list in this document.
 
-Already done, though an earlier version of this file listed them as future work: 3D batch entry
-points via SoA, `fv_vec4` with `_x2` AoS and `_soa` reduction batches, and the `fv_quat` / `fv_mat3`
-physics primitives above.
+What is deliberately **outside** the scope, not pending: threading / scheduling and other engine
+facilities, allocation or arena ownership (the library never allocates), a double-precision batch
+family, and a `_fast` variant of every entry (only normalize has one). Those would change the
+value-semantics, no-allocation contract rather than complete it.
 
 ## Documentation
 

@@ -20,7 +20,9 @@ CPPFLAGS ?= -Iinclude
 BUILD := build
 LIB   := $(BUILD)/libflashvec.a
 OBJ   := $(BUILD)/flashvec.o $(BUILD)/flashvec_batch.o $(BUILD)/flashvec_vec4.o \
-         $(BUILD)/flashvec_quat.o $(BUILD)/flashvec_mat3.o $(BUILD)/flashvec_physics_batch.o
+         $(BUILD)/flashvec_quat.o $(BUILD)/flashvec_mat3.o $(BUILD)/flashvec_mat4.o \
+         $(BUILD)/flashvec_fast.o $(BUILD)/flashvec_fast_batch.o \
+         $(BUILD)/flashvec_physics_batch.o
 
 .PHONY: all test clean
 
@@ -110,7 +112,7 @@ test-all: test test-p0 test-batch test-mat4 test-mat4-c test-mat4-inline test-ma
           test-maddnorm test-maddnorm-c test-maddnorm-inline test-maddnorm-fma \
           test-addmul test-addmul-c test-addmul-inline test-addmul-fma \
           test-stream test-stream-parity test-stream-parity-fma \
-          test-physics
+          test-physics test-mat4-ops test-fast
 
 # ------------- Acceptance targets for the header-inline form (P1 refactor): append-only; not one command of the targets above was changed -------------
 #   make test-header          strict compile profile (C11 -pedantic-errors / C++17 -Wpedantic); double inclusion in one TU;
@@ -642,12 +644,21 @@ bench-addmul: $(BUILD)/bench_addmul
 #   test-physics-c   plain C11 caller: scalar API links, batch entries compile and are bit-identical
 #   test-physics     all of the above forms (this is what test-all depends on)
 #   bench-physics    scalar-per-element vs SoA batch, same-process A/B, 11 paired rounds + A/A control
-.PHONY: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma test-physics bench-physics
+.PHONY: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma test-physics test-mat4-ops test-fast bench-physics bench-fast bench-vec34
 
 $(BUILD)/flashvec_quat.o: src/flashvec_quat.cpp include/flashvec.h | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/flashvec_mat3.o: src/flashvec_mat3.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/flashvec_mat4.o: src/flashvec_mat4.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/flashvec_fast.o: src/flashvec_fast.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/flashvec_fast_batch.o: src/flashvec_fast_batch.cpp include/flashvec.h | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
 
 $(BUILD)/flashvec_physics_batch.o: src/flashvec_physics_batch.cpp include/flashvec.h | $(BUILD)
@@ -723,8 +734,32 @@ test-physics-fma: $(BUILD)/test_quat_fma $(BUILD)/test_mat3_fma
 test-physics: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma
 	@echo "== P6 physics primitives: quat + mat3 scalar and SoA batch, all forms green =="
 
+$(BUILD)/test_mat4_ops: tests/test_mat4_ops.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+test-mat4-ops: $(BUILD)/test_mat4_ops
+	./$(BUILD)/test_mat4_ops
+
+$(BUILD)/test_fast: tests/test_fast.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+test-fast: $(BUILD)/test_fast
+	./$(BUILD)/test_fast
+
 $(BUILD)/bench_physics: tests/bench_physics.cpp $(LIB) include/flashvec.h | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
 bench-physics: $(BUILD)/bench_physics
 	./$(BUILD)/bench_physics
+
+$(BUILD)/bench_fast: tests/bench_fast.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+bench-fast: $(BUILD)/bench_fast
+	./$(BUILD)/bench_fast
+
+$(BUILD)/bench_vec34: tests/bench_vec34.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+bench-vec34: $(BUILD)/bench_vec34
+	./$(BUILD)/bench_vec34
