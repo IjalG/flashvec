@@ -24,6 +24,7 @@
 | P1+ | 5 SoA batch functions for `fv_vec3` (no padding on the three-component form, SoA only) | done |
 | P6 | `fv_quat` + `fv_mat3` scalar API (rotation / 3x3) | done |
 | P6 | SoA batch: quat multiply / normalize / rotate-vector, mat3 transform | done |
+| P6 | General inverses: `fv_quat_inverse` (+checked), `fv_mat3_determinant` / `fv_mat3_inverse` (+checked) | done |
 | P6 | Tests: C/C++ x inline/extern/pure-C + FMA consumer, batch bit-identical to per-value | done |
 | P6 | Preliminary A/B measurement (`make bench-physics`) | done (preliminary, not five-criterion acceptance) |
 | — | Docs: header contract comments, `README.md`, this log, `docs/acceptance-protocol.md` | done |
@@ -303,6 +304,7 @@ cd ../bench && make run          # 三档实现 vs 标量基准（另一个夹�
 | `fv_quat` (16 B, x/y/z/w, identity (0,0,0,1)) + `fv_mat3` (36 B, row-major) | done |
 | Scalar quat API: `make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / mul / rotate_vec3` | done |
 | Scalar mat3 API: `from_rows / transform_vec3 / mul / transpose / from_quat` | done |
+| General inverse: `fv_quat_inverse` + `_checked`; `fv_mat3_determinant` / `fv_mat3_inverse` + `_checked` | done |
 | SoA batch: `fv_quat_mul_soa`, `fv_quat_normalize_soa`, `fv_quat_rotate_vec3_soa`, `fv_mat3_transform_vec3_soa` | done |
 | Tests: C++ scalar + batch parity, C11 inline / `FV_USE_EXTERN` / pure-C, FMA consumer | done |
 | Preliminary A/B measurement (`make bench-physics`) | done (preliminary) |
@@ -325,6 +327,13 @@ wrappers), `Makefile` (objects, test/bench targets), `README.md` (this group), t
 - **mat3 layout**: 36 B, row-major, compact 9 floats, no padding. Padding to 48/64 B is a caller-side
   AoS choice; the library's batch form is SoA and does not need a padded struct. The row-major
   convention is the same as `fv_mat4` (and the opposite of GLM).
+- **Inverse is the general one** (`conjugate(q)/|q|^2` for a quat, adjugate/det for a 3x3), not just
+  the unit/orthonormal shortcut. Degenerate input returns the **zero** value, not the identity: a hidden
+  identity would make a degenerate input look valid. The quat threshold is `|q|^2 <= FV_EPS_SQR` (the
+  dimensionally correct form of `length <= FV_EPS`); the mat3 threshold is `|det| <= FV_EPS *
+  max|entry|^3`, scale-relative, so a uniformly scaled invertible matrix stays invertible. Both
+  `_checked` variants return 1/0 and write the zero value on failure; `fv_mat3_inverse_checked` allows
+  `out == m`.
 - **No slerp / axis-angle / Euler this round**: they need sin/cos and an input-domain contract, which
   is a separate design decision (see section 4).
 
@@ -332,9 +341,9 @@ wrappers), `Makefile` (objects, test/bench targets), `README.md` (this group), t
 
 | Source | Result |
 |---|---|
-| `make test-quat` | 24,311 checks, 0 failures: scalar semantics + batch bit-parity, n = 0..40 (every tail) + 63 / 1024 / 4097 |
-| `make test-mat3` | 8,162 checks, 0 failures: same coverage for the 3x3 API |
-| `make test-physics-c` | 3,904 checks, 0 failures; the same source also passes under `-DFV_USE_EXTERN` and `-DFV_I_NO_INTRINSICS` |
+| `make test-quat` | 26,321 checks, 0 failures: scalar semantics (including general inverse) + batch bit-parity, n = 0..40 (every tail) + 63 / 1024 / 4097 |
+| `make test-mat3` | 14,182 checks, 0 failures: same coverage for the 3x3 API, including determinant/inverse/singular paths |
+| `make test-physics-c` | 3,916 checks, 0 failures; the same source also passes under `-DFV_USE_EXTERN` and `-DFV_I_NO_INTRINSICS` |
 | `make test-physics-fma` | both C++ tests pass under `-march=native -mfma -ffp-contract=fast`; `vfmadd` = 0 in both consumer objects |
 | Vectorization census | quat mul 40, rotate 40, mat3 21 AVX2 instructions including loads/stores, 0 `vpermps`/`vshufps`; normalize 29 (explicit kernel) |
 | `make test-all` | green; `test-physics` is appended to the target list |
@@ -365,7 +374,8 @@ the run.
 
 - Quaternion interpolation (slerp / shortest-arc lerp), axis-angle and Euler construction (sin/cos +
   domain contract).
-- Full `fv_mat4` operations (multiply / inverse), quaternion-from-matrix, batch `fv_mat3_mul`.
+- Full `fv_mat4` operations (multiply / inverse); quaternion-from-matrix; batch `fv_mat3_mul` (the
+  per-body scalar 3x3 inverse is the current use case, so a batch inverse is not planned yet).
 - Absolute speedup for the 3D/4D entries (still unmeasured).
 - A hardened P6 A/B fixture under the five acceptance criteria; `bench-physics` is a preliminary
   harness, not the acceptance one.

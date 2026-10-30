@@ -91,6 +91,19 @@ static void test_quat_scalar(void)
         CHECK(fabsf(u.x) < 1e-6f && fabsf(u.y) < 1e-6f && fabsf(u.z) < 1e-6f);
         CHECK(fabsf(u.w - 1.0f) < 1e-6f);
     }
+
+    /* General inverse: q * inverse(q) is the identity; the zero quaternion is reported as invalid. */
+    {
+        fv_quat q = fv_quat_make(0.2f, -0.3f, 0.4f, 0.8f);
+        fv_quat inv = fv_quat_inverse(q);
+        fv_quat u = fv_quat_mul(q, inv);
+        fv_quat z = fv_quat_make(0, 0, 0, 0);
+        fv_quat out = fv_quat_make(9, 9, 9, 9);
+        CHECK(fabsf(u.x) < 1e-6f && fabsf(u.y) < 1e-6f && fabsf(u.z) < 1e-6f);
+        CHECK(fabsf(u.w - 1.0f) < 1e-6f);
+        CHECK(fv_quat_inverse_checked(z, &out) == 0);
+        CHECK(out.x == 0 && out.y == 0 && out.z == 0 && out.w == 0);
+    }
 }
 
 static void test_mat3_scalar(void)
@@ -115,6 +128,26 @@ static void test_mat3_scalar(void)
     {
         fv_mat3 qm = fv_mat3_from_quat(fv_quat_identity());
         CHECK(memcmp(&qm, &id, sizeof(id)) == 0);
+    }
+
+    /* Inverse: identity, a known matrix (det = 9), and the singular/checked path. */
+    {
+        fv_mat3 inv;
+        fv_mat3 known = fv_mat3_from_rows(fv_vec3_make(4, 7, 2),
+                                          fv_vec3_make(3, 6, 1),
+                                          fv_vec3_make(2, 5, 3));
+        fv_mat3 zero;
+        fv_mat3 p;
+        memset(&zero, 0, sizeof(zero));
+        CHECK(fv_mat3_determinant(&id) == 1);
+        CHECK(fv_mat3_inverse_checked(&id, &inv) == 1);
+        CHECK(memcmp(&inv, &id, sizeof(id)) == 0);
+        CHECK(fabsf(fv_mat3_determinant(&known) - 9.0f) < 1e-5f);
+        CHECK(fv_mat3_inverse_checked(&known, &inv) == 1);
+        p = fv_mat3_mul(&known, &inv);
+        CHECK(fabsf(fv_mat3_transform_vec3(&p, fv_vec3_make(1, 0, 0)).x - 1.0f) < 1e-5f);
+        CHECK(fv_mat3_inverse_checked(&zero, &inv) == 0);
+        CHECK(memcmp(&inv, &zero, sizeof(zero)) == 0);
     }
 }
 

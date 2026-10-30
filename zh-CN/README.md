@@ -146,7 +146,9 @@ void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_v
 | `fv_quat` | 16 B | `x/y/z/w`，单位元 `(0,0,0,1)`；与 `fv_vec4` 布局兼容但是不同类型 |
 | `fv_mat3` | 36 B | 行主序 `m[row*3+col]`，与 `fv_mat4` 同约定（与 GLM 相反），9 float 紧凑无 padding |
 
-标量 API：`fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / mul / rotate_vec3`；`fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat`。`fv_quat_mul(a,b)` 是 `a*b`，先作用 `b` 再作用 `a`；`fv_quat_normalize` 对长度 <= `FV_EPS` 返回单位元（不是零），这是与向量 normalize 唯一的有意差异；`rotate_vec3` 与 `from_quat` 假定 `q` 是单位四元数，不自动归一化。
+标量 API：`fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / inverse / mul / rotate_vec3`；`fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat / determinant / inverse / inverse_checked`。`fv_quat_mul(a,b)` 是 `a*b`，先作用 `b` 再作用 `a`；`fv_quat_normalize` 对长度 <= `FV_EPS` 返回单位元（不是零），这是与向量 normalize 唯一的有意差异；`rotate_vec3` 与 `from_quat` 假定 `q` 是单位四元数，不自动归一化。
+
+`fv_quat_inverse` 是一般逆 `conjugate(q) / |q|²`（单位四元数下等于共轭）；长度 <= `FV_EPS` 返回**零**四元数而不是单位元——逆不存在，零是信号。`fv_mat3_inverse` 是伴随矩阵 / 行列式；当 `|det| <= FV_EPS * max|entry|³`（相对阈值，所以 `1e-3 * I` 仍可逆）时视为奇异，按值版本返回零矩阵。`_checked` 版本返回 1 / 0，失败时写入零值；`fv_mat3_inverse_checked` 允许 `out == m`。
 
 批量（SoA，每 ymm 8 个元素）：`fv_quat_mul_soa`、`fv_quat_normalize_soa`、`fv_quat_rotate_vec3_soa`、`fv_mat3_transform_vec3_soa`。四个入口对任意 n 与尾长都与逐值 API 逐位一致，且在同一 `fp-contract=off` pragma 内；`make test-physics-fma` 用 `-march=native -mfma -ffp-contract=fast` 消费者验证，`vfmadd=0`。
 

@@ -175,10 +175,18 @@ composition order. `fv_quat_rotate_vec3` and `fv_mat3_from_quat` assume a unit q
 normalize. `fv_quat_normalize` maps length <= `FV_EPS` to the identity -- the one deliberate difference
 from `fv_vec*_normalize`, which returns the zero vector: a zero quaternion is not a rotation.
 
+`fv_quat_inverse` is the general inverse `conjugate(q) / |q|^2` (for a unit q it equals the conjugate).
+A length <= `FV_EPS` returns the **zero** quaternion, not the identity: the inverse does not exist, and
+zero is the signal. `fv_mat3_inverse` is the adjugate / determinant; a matrix is treated as singular when
+`|det| <= FV_EPS * max|entry|^3` (a scale-relative test, so `1e-3 * I` stays invertible), and the value
+form then returns the zero matrix. The `_checked` forms return 1 / 0 and write the zero value on failure;
+`fv_mat3_inverse_checked` accepts `out == m`.
+
 ### Scalar and batch API
 
-Scalar: `fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate / mul /
-rotate_vec3`; `fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat`.
+Scalar: `fv_quat_make / add / sub / neg / scale / dot / len_sqr / len / normalize / conjugate /
+inverse / mul / rotate_vec3`; `fv_mat3_from_rows / transform_vec3 / mul / transpose / from_quat /
+determinant / inverse / inverse_checked`.
 
 Batch (SoA, 8 elements per 256-bit register; a quaternion is four arrays, a 3x3 is nine):
 

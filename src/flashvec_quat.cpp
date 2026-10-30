@@ -84,6 +84,31 @@ fv_quat fv_quat_conjugate(fv_quat q)
     return fv_quat_make(-q.x, -q.y, -q.z, q.w);
 }
 
+/* General inverse: conjugate(q) / |q|^2. The threshold is on the squared length, so it is
+ * dimensionally consistent with FV_EPS (length <= FV_EPS <=> len_sqr <= FV_EPS_SQR). A degenerate
+ * input writes the zero quaternion and returns 0; the value form returns that zero. */
+int fv_quat_inverse_checked(fv_quat q, fv_quat *out)
+{
+    fv_real l2 = fv_quat_len_sqr(q);
+    if (!(l2 > FV_EPS_SQR)) {
+        *out = fv_quat_make((fv_real)0, (fv_real)0, (fv_real)0, (fv_real)0);
+        return 0;
+    }
+    {
+        fv_real inv = (fv_real)1 / l2;
+        fv_quat c = fv_quat_conjugate(q);
+        *out = fv_quat_scale(c, inv);
+        return 1;
+    }
+}
+
+fv_quat fv_quat_inverse(fv_quat q)
+{
+    fv_quat r;
+    (void)fv_quat_inverse_checked(q, &r);
+    return r;
+}
+
 /* Hamilton product a*b: applies b first, then a. Association order fixed as
  * ((w1*x2 + x1*w2) + y1*z2) - z1*y2, and the three analogues -- see the note in include/flashvec.h. */
 fv_quat fv_quat_mul(fv_quat a, fv_quat b)

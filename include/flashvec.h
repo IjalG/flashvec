@@ -403,6 +403,14 @@ fv_quat fv_quat_normalize(fv_quat q);
 /* Conjugate (-x, -y, -z, w): the inverse of a unit quaternion is its conjugate. */
 fv_quat fv_quat_conjugate(fv_quat q);
 
+/* Inverse of a general quaternion: conjugate(q) / |q|^2. This is the inverse for non-unit q as well;
+ * for a unit q it equals the conjugate. Length <= FV_EPS (|q|^2 <= FV_EPS_SQR) returns the **zero**
+ * quaternion (0,0,0,0) -- the inverse does not exist, and zero is the signal. It is deliberately not
+ * the identity: an identity would hide the degenerate input. The _checked form returns 1 on success,
+ * 0 on the degenerate case, and writes the same zero value to *out (out must be non-NULL). */
+fv_quat fv_quat_inverse(fv_quat q);
+int fv_quat_inverse_checked(fv_quat q, fv_quat *out);
+
 /* Hamilton product a*b: applies b first, then a. */
 fv_quat fv_quat_mul(fv_quat a, fv_quat b);
 /* Rotate v by the **unit** quaternion q: v' = q * (v, 0) * conjugate(q). No normalization is done here. */
@@ -418,6 +426,17 @@ fv_mat3 fv_mat3_mul(const fv_mat3 *a, const fv_mat3 *b);
 fv_mat3 fv_mat3_transpose(const fv_mat3 *m);
 /* Row-major rotation matrix of a **unit** quaternion: v' = R*v has the same rotation as fv_quat_rotate_vec3. */
 fv_mat3 fv_mat3_from_quat(fv_quat q);
+
+/* Determinant, row-major, evaluated as
+ * m00*(m11*m22 - m12*m21) - m01*(m10*m22 - m12*m20) + m02*(m10*m21 - m11*m20). */
+fv_real fv_mat3_determinant(const fv_mat3 *m);
+/* Inverse = adjugate / determinant. A matrix is treated as singular when
+ * |det| <= FV_EPS * max|entry|^3 (a scale-relative test: uniformly scaling an invertible matrix by
+ * a positive factor keeps it invertible). The value form returns the **zero matrix** for a singular
+ * input; the _checked form returns 1 on success, 0 on a singular input, and writes the zero matrix
+ * either way. In the _checked form *out may alias *m (all reads happen before the write). */
+fv_mat3 fv_mat3_inverse(const fv_mat3 *m);
+int fv_mat3_inverse_checked(const fv_mat3 *m, fv_mat3 *out);
 
 /* ============================ batch entry points (P1) ============================
  *

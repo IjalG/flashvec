@@ -154,6 +154,20 @@ static fv_vec3 ref_rotate(fv_quat q, fv_vec3 v)
     return r;
 }
 
+/* The same expression order as fv_quat_inverse: conjugate first, then scale by 1/|q|^2. */
+static fv_quat ref_inverse(fv_quat q)
+{
+    fv_real l2 = fv_quat_len_sqr(q);
+    if (!(l2 > FV_EPS_SQR)) {
+        return fv_quat_make((fv_real)0, (fv_real)0, (fv_real)0, (fv_real)0);
+    }
+    {
+        fv_real inv = (fv_real)1 / l2;
+        fv_quat c = fv_quat_conjugate(q);
+        return fv_quat_scale(c, inv);
+    }
+}
+
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options
 #endif
@@ -333,7 +347,60 @@ static void test_rotate(void)
     }
 }
 
-/* ------------------------------------------------------------------ 5. SoA batch parity */
+/* ------------------------------------------------------------------ 5. inverse */
+
+static void test_inverse(void)
+{
+    fv_quat id = fv_quat_identity();
+    fv_quat q = fv_quat_make(0.3f, -0.7f, 0.2f, -0.5f);
+    fv_quat qn = fv_quat_normalize(q);
+    fv_quat inv;
+    fv_quat p;
+    int k;
+
+    /* Unit quaternion: the inverse is the conjugate (up to the usual rounding of |q|^2). */
+    inv = fv_quat_inverse(qn);
+    CHECK(quat_near(inv, fv_quat_conjugate(qn), (fv_real)2e-6));
+    p = fv_quat_mul(qn, inv);
+    CHECK(quat_near(p, id, (fv_real)2e-6));
+
+    /* General quaternion: q * inverse(q) is the identity. */
+    inv = fv_quat_inverse(q);
+    p = fv_quat_mul(q, inv);
+    CHECK(quat_near(p, id, (fv_real)2e-6));
+
+    /* Degenerate inputs: the value form is the zero quaternion, the checked form reports 0. */
+    {
+        fv_quat z = fv_quat_make(0, 0, 0, 0);
+        fv_quat tiny = fv_quat_make((fv_real)1e-7, 0, 0, 0);
+        fv_quat out = fv_quat_make(9, 9, 9, 9);
+        CHECK(quat_bits_equal(fv_quat_inverse(z),
+                              fv_quat_make((fv_real)0, (fv_real)0, (fv_real)0, (fv_real)0)));
+        CHECK(quat_bits_equal(fv_quat_inverse(tiny),
+                              fv_quat_make((fv_real)0, (fv_real)0, (fv_real)0, (fv_real)0)));
+        CHECK(fv_quat_inverse_checked(z, &out) == 0);
+        CHECK(quat_bits_equal(out,
+                              fv_quat_make((fv_real)0, (fv_real)0, (fv_real)0, (fv_real)0)));
+        CHECK(fv_quat_inverse_checked(tiny, &out) == 0);
+    }
+
+    /* Checked success writes the same value as the value form. */
+    {
+        fv_quat out = fv_quat_make(9, 9, 9, 9);
+        CHECK(fv_quat_inverse_checked(q, &out) == 1);
+        CHECK(quat_bits_equal(out, fv_quat_inverse(q)));
+    }
+
+    /* Independent reference, bit for bit, for non-degenerate random inputs. */
+    for (k = 0; k < 2000; ++k) {
+        fv_quat a = fv_quat_make(rnd_moderate(), rnd_moderate(), rnd_moderate(), rnd_moderate());
+        if (fv_quat_len_sqr(a) > FV_EPS_SQR) {
+            CHECK(quat_bits_equal(fv_quat_inverse(a), ref_inverse(a)));
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ 6. SoA batch parity */
 
 static void fill_case(size_t n)
 {
@@ -428,6 +495,7 @@ int main(void)
     test_mul();
     test_normalize();
     test_rotate();
+    test_inverse();
 
     printf("== fv_quat SoA batch: bit-identical to the per-value API (n = 0..40 all tails + 63 + 1024 + 4097) ==\n");
     test_batch_mul(0);

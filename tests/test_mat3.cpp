@@ -61,6 +61,24 @@ static int mat3_bits_equal(fv_mat3 a, fv_mat3 b)
     return memcmp(&a, &b, sizeof(a)) == 0;
 }
 
+static int same_bits_float(fv_real a, fv_real b)
+{
+    return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+/* Component equality that treats +0 and -0 as equal: inverse involves a multiply by 1/det, whose
+ * sign can turn a zero cofactor into -0; that is not a numerical difference. */
+static int mat3_component_equal(fv_mat3 a, fv_mat3 b)
+{
+    int k;
+    for (k = 0; k < 9; ++k) {
+        if (a.m[k] != b.m[k]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void poison_float(float *p, size_t n)
 {
     size_t i;
@@ -121,6 +139,32 @@ static fv_mat3 ref_mul(const fv_mat3 *a, const fv_mat3 *b)
                              a->m[i * 3 + 2] * b->m[2 * 3 + j];
         }
     }
+    return r;
+}
+
+static fv_real ref_det(const fv_mat3 *m)
+{
+    return (m->m[0] * (m->m[4] * m->m[8] - m->m[5] * m->m[7]) -
+            m->m[1] * (m->m[3] * m->m[8] - m->m[5] * m->m[6])) +
+           m->m[2] * (m->m[3] * m->m[7] - m->m[4] * m->m[6]);
+}
+
+/* Same cofactor/determinant expression order as fv_mat3_inverse; no threshold (the caller only
+ * compares it on matrices the library accepted). */
+static fv_mat3 ref_inverse(const fv_mat3 *m)
+{
+    fv_real det = ref_det(m);
+    fv_real inv = (fv_real)1 / det;
+    fv_mat3 r;
+    r.m[0] = (m->m[4] * m->m[8] - m->m[5] * m->m[7]) * inv;
+    r.m[1] = (m->m[2] * m->m[7] - m->m[1] * m->m[8]) * inv;
+    r.m[2] = (m->m[1] * m->m[5] - m->m[2] * m->m[4]) * inv;
+    r.m[3] = (m->m[5] * m->m[6] - m->m[3] * m->m[8]) * inv;
+    r.m[4] = (m->m[0] * m->m[8] - m->m[2] * m->m[6]) * inv;
+    r.m[5] = (m->m[2] * m->m[3] - m->m[0] * m->m[5]) * inv;
+    r.m[6] = (m->m[3] * m->m[7] - m->m[4] * m->m[6]) * inv;
+    r.m[7] = (m->m[1] * m->m[6] - m->m[0] * m->m[7]) * inv;
+    r.m[8] = (m->m[0] * m->m[4] - m->m[1] * m->m[3]) * inv;
     return r;
 }
 
@@ -252,6 +296,88 @@ static void test_from_quat(void)
     }
 }
 
+static void test_inverse(void)
+{
+    fv_mat3 id = fv_mat3_identity();
+    fv_mat3 zero;
+    fv_mat3 inv;
+    fv_mat3 p;
+    int k;
+
+    memset(&zero, 0, sizeof(zero));
+
+    CHECK(fv_mat3_determinant(&id) == 1);
+    CHECK(mat3_bits_equal(fv_mat3_inverse(&id), id));
+
+    /* A known invertible matrix: det = 9, and m * inverse(m) is the identity. */
+    {
+        fv_mat3 m = make_mat(4, 7, 2, 3, 6, 1, 2, 5, 3);
+        fv_real det = fv_mat3_determinant(&m);
+        CHECK(feq(det, (fv_real)9, (fv_real)1e-5));
+        inv = fv_mat3_inverse(&m);
+        p = fv_mat3_mul(&m, &inv);
+        CHECK(vec3_near(fv_mat3_transform_vec3(&p, fv_vec3_make(1, 0, 0)), fv_vec3_make(1, 0, 0), (fv_real)1e-5));
+        CHECK(vec3_near(fv_mat3_transform_vec3(&p, fv_vec3_make(0, 1, 0)), fv_vec3_make(0, 1, 0), (fv_real)1e-5));
+        CHECK(vec3_near(fv_mat3_transform_vec3(&p, fv_vec3_make(0, 0, 1)), fv_vec3_make(0, 0, 1), (fv_real)1e-5));
+    }
+
+    /* Negative determinant is still invertible. */
+    {
+        fv_mat3 m = make_mat(1, 0, 0, 0, 1, 0, 0, 0, -1);
+        CHECK(fv_mat3_determinant(&m) == -1);
+        CHECK(fv_mat3_inverse_checked(&m, &inv) == 1);
+        CHECK(mat3_component_equal(inv, m));
+    }
+
+    /* Singular inputs: zero matrix, rank-deficient matrix, and a scale small enough to fall under
+     * the relative threshold. The value form is the zero matrix, the checked form reports 0. */
+    {
+        fv_mat3 rank1 = make_mat(1, 2, 3, 2, 4, 6, 0, 1, 0);
+        fv_mat3 small = make_mat(1, 0, 0, 0, 1, 0, 0, 0, (fv_real)1e-7);
+        fv_mat3 out = make_mat(9, 9, 9, 9, 9, 9, 9, 9, 9);
+        CHECK(fv_mat3_determinant(&rank1) == 0);
+        CHECK(mat3_bits_equal(fv_mat3_inverse(&zero), zero));
+        CHECK(mat3_bits_equal(fv_mat3_inverse(&rank1), zero));
+        CHECK(mat3_bits_equal(fv_mat3_inverse(&small), zero));
+        CHECK(fv_mat3_inverse_checked(&zero, &out) == 0);
+        CHECK(mat3_bits_equal(out, zero));
+        CHECK(fv_mat3_inverse_checked(&rank1, &out) == 0);
+        CHECK(fv_mat3_inverse_checked(&small, &out) == 0);
+    }
+
+    /* Just above the threshold the same shape is accepted (det 1e-5 > 1e-6). */
+    {
+        fv_mat3 near_singular = make_mat(1, 0, 0, 0, 1, 0, 0, 0, (fv_real)1e-5);
+        CHECK(fv_mat3_inverse_checked(&near_singular, &inv) == 1);
+    }
+
+    /* out may alias m: the implementation reads everything before writing. */
+    {
+        fv_mat3 m = make_mat(4, 7, 2, 3, 6, 1, 2, 5, 3);
+        fv_mat3 orig = m;
+        CHECK(fv_mat3_inverse_checked(&m, &m) == 1);
+        p = fv_mat3_mul(&orig, &m);
+        CHECK(vec3_near(fv_mat3_transform_vec3(&p, fv_vec3_make(1, 0, 0)), fv_vec3_make(1, 0, 0), (fv_real)1e-5));
+    }
+
+    /* Independent reference, bit for bit, and m * inverse(m) = I for well-conditioned inputs. */
+    for (k = 0; k < 2000; ++k) {
+        fv_mat3 m = make_mat(rnd_moderate(), rnd_moderate(), rnd_moderate(),
+                             rnd_moderate(), rnd_moderate(), rnd_moderate(),
+                             rnd_moderate(), rnd_moderate(), rnd_moderate());
+        fv_real det = fv_mat3_determinant(&m);
+        CHECK(same_bits_float(det, ref_det(&m)));
+        if (fv_mat3_inverse_checked(&m, &inv) == 1) {
+            CHECK(mat3_bits_equal(inv, ref_inverse(&m)));
+            if (fabsf((float)det) > 0.05f) {
+                p = fv_mat3_mul(&m, &inv);
+                CHECK(vec3_near(fv_mat3_transform_vec3(&p, fv_vec3_make(1, 0, 0)),
+                                fv_vec3_make(1, 0, 0), (fv_real)1e-3));
+            }
+        }
+    }
+}
+
 static void fill_case(size_t n)
 {
     size_t i;
@@ -294,6 +420,7 @@ int main(void)
     test_basics();
     test_mul();
     test_from_quat();
+    test_inverse();
 
     printf("== fv_mat3 SoA batch: bit-identical to the per-value API (n = 0..40 all tails + 63 + 1024 + 4097) ==\n");
     test_batch(0);
