@@ -49,6 +49,8 @@ fv_vec2_add_x4(pos, vel, pos, N);
 
 默认形态把每个标量函数体写成 header 里的 `static inline`，与批量内核共用同一个 `fp-contract=off` pragma；`FV_USE_EXTERN` 切到库内符号，两种形态逐位一致（`make test-scalar-parity`）。混合标量循环实测（`make bench-scalar`）：默认形态比 `FV_USE_EXTERN` 快 **1.70–1.82x**；`-mfma -ffp-contract=fast` 的消费者仍然 **0 条 `vfmadd`**。默认形态是 `static inline`；需要稳定的库符号 / 函数地址 / ABI 边界时用 `FV_USE_EXTERN`。`normalize` 即使内联也保留标量 `sqrt`/`div` 与零分支，追平它要用 `_fast` 族。
 
+精确形态请用 **`-ffp-contract=off`** 编译（库文档默认）。这样所有标量体都会内联：本地 115 项 GLM 复测在该档的 P 组中位数是 **1.00x**，而报告默认的 `-ffp-contract=fast` 档是 0.86x。原因是含 `a + b*c` 的标量体在允许 FMA 的调用方下不能被强制内联而不让调用方收缩；该 flag 让调用方与 header 的 `fp-contract=off` 优化节点一致。
+
 `min` / `max` / `clamp` 的 NaN 语义是 `(a < b) ? a : b`，不是 IEEE 的 `fminf`。这一点写进了头文件。
 
 ## 批量 API
@@ -158,9 +160,9 @@ void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_v
 
 `fv_quat_from_mat3` 用 Shepperd 的“最大对角分支”法，假定输入是旋转矩阵；`fv_mat4_mul` / `fv_mat4_inverse` 是**通用** 4x4 运算（不只仿射），逆用伴随矩阵 / 行列式闭式解，奇异阈值同样是相对的（`|det| <= FV_EPS * max|entry|⁴`），按值版本返回零矩阵，`fv_mat4_inverse_checked` 返回 1 / 0 且允许 `out == m`。
 
-批量（SoA，每 ymm 8 个元素）：`fv_quat_mul_soa`、`fv_quat_normalize_soa`、`fv_quat_rotate_vec3_soa`、`fv_mat3_transform_vec3_soa`、`fv_mat3_mul_soa`、`fv_mat3_inverse_soa`。前六个对任意 n 与尾长都与逐值 API 逐位一致；mat3 乘 / 逆现在有独立 AVX2 内核：乘把 9 个 B 列常驻寄存器、每次算 3 个输出行；逆每 8 个元素只做一次 `vdivps(1/det)`（而不是 9 次标量除法），奇异 lane 用 blend 写零。尾长仍走标量，逐位不变。本地 `make bench-mat3`（P0 后的默认内联标量基线）：乘 8192 4.9x、1M 3.1x；逆 9.7x、2.7x。相对旧的 `FV_USE_EXTERN` 标量形态，同一批内核测得 13.3x / 3.5x 与 14.7x / 3.2x。这些是本地基线，不是 GLM 报告的比值。`fv_vec2/vec3/vec4_normalize_soa_fast` 与 `fv_quat_normalize_soa_fast` 是独立的近似族（`rsqrtps` + 一次牛顿迭代，约 1–2 ulp，标量回退用精确 `1/sqrtf`），不承诺与精确入口逐位一致。
+批量（SoA，每 ymm 8 个元素）：`fv_quat_mul_soa`、`fv_quat_normalize_soa`、`fv_quat_rotate_vec3_soa`、`fv_mat3_transform_vec3_soa`、`fv_mat3_mul_soa`、`fv_mat3_inverse_soa`。前六个对任意 n 与尾长都与逐值 API 逐位一致；mat3 乘 / 逆现在有独立 AVX2 内核：乘把 9 个 B 列常驻寄存器、每次算 3 个输出行；逆每 8 个元素只做一次 `vdivps(1/det)`（而不是 9 次标量除法），奇异 lane 用 blend 写零。尾长仍走标量，逐位不变。本地 `make bench-mat3`（P0 后的默认内联标量基线）：乘 8192 4.9x、1M 3.1–3.6x；逆 9.7x、1M 2.7–3.5x。相对旧的 `FV_USE_EXTERN` 标量形态，同一批内核测得 13.3x / 3.5x 与 14.7x / 3.2x。对 GLM 的逐元素循环（本地 115 项复测）：`m3_mul_soa` 在 8192 的 `-O2`/`-O3n` 为 **5.90x / 4.18x**，2M 为 3.88x / 1.27x；`m3_inverse_soa` 为 **4.59x / 4.59x**，2M 为 2.78x / 2.62x。报告里的 0.48x / 0.68x 负项已消失。`fv_vec2/vec3/vec4_normalize_soa_fast` 与 `fv_quat_normalize_soa_fast` 是独立的近似族（`rsqrtps` + 一次牛顿迭代，约 1–2 ulp，标量回退用精确 `1/sqrtf`），不承诺与精确入口逐位一致。
 
-实现：quat 乘 / 旋转、mat3 变换是 `target("avx2")` 里的纯 C，GCC 自动向量化成 256 位且零 shuffle（实测 40 / 40 / 21 条 AVX2 指令，0 个 `vpermps`/`vshufps`）；quat normalize 是编译器唯一没向量化的（保留 `sqrtss`/`divss` 与分支），因此单独写了 AVX2 内核（29 条 ymm）。`_fast` 族用 `rsqrtps` + 一次牛顿迭代；`fv_vec2_madd_normalize_soa_fast` 是融合近似路径，8192 档比精确融合快 1.07x，1M 档在 A/A 噪声内。精确融合入口另有**可选 AVX-512 backend**：`target("avx512f")` 的 16-lane 内核，运行时由 `__builtin_cpu_supports("avx512f")` 选择；AVX2 路径不变，`FV_I_NO_AVX512` 可移除。本机没有 AVX-512，只验证了 codegen（存在 `vrsqrt14ps` / `zmm`），运行时路径仍需 AVX-512 硬件验证。`fv_atan_approx` 是 `[-1,1]` 上的 5 项多项式（最大绝对误差约 1.2e-5，域外返回 NaN）。
+实现：quat 乘 / 旋转、mat3 变换是 `target("avx2")` 里的纯 C，GCC 自动向量化成 256 位且零 shuffle（实测 40 / 40 / 21 条 AVX2 指令，0 个 `vpermps`/`vshufps`）；quat normalize 是编译器唯一没向量化的（保留 `sqrtss`/`divss` 与分支），因此单独写了 AVX2 内核（29 条 ymm）。`_fast` 族用 `rsqrtps` + 一次牛顿迭代；`fv_vec2_madd_normalize_soa_fast` 是融合近似路径，8192 档比精确融合快 1.07x，1M 档在 A/A 噪声内。对 GLM，精确融合入口在 8192 的 `-O2`/`-O3n` 为 **6.55x / 7.50x**，2M 为 1.09x / 1.16x；报告里的 0.79x 来自它的 AVX-512 云机，本地未复现。精确融合入口另有**可选 AVX-512 backend**：`target("avx512f")` 的 16-lane 内核，运行时由 `__builtin_cpu_supports("avx512f")` 选择；AVX2 路径不变，`FV_I_NO_AVX512` 可移除。本机没有 AVX-512，只验证了 codegen（存在 `vrsqrt14ps` / `zmm`），运行时路径仍需 AVX-512 硬件验证。`fv_atan_approx` 是 `[-1,1]` 上的 5 项多项式（最大绝对误差约 1.2e-5，域外返回 NaN）。
 
 初步测量（`make bench-physics`，同进程交错 A/B，11 轮配对，`taskset -c 0`，两次运行中位数；A/A 地板 8192 约 0.99–1.00、1M 约 0.93–1.07）：
 
@@ -367,6 +369,19 @@ N = 8192，每数组 32 KB，L2 驻留：
 - AoS↔SoA 拆装由 `make bench-pack` 测量：往返成本在 n=8192 约 0.28–0.32 ns/元素、n=1M 约 4.2–4.4 ns/元素。AoS 输入下，`pack + add_soa + unpack` 在 8192 比 `fv_vec2_add_x4` 慢 2.5 倍、1M 慢 3.1 倍；normalize 在 8192 仍快 3.9 倍，但 1M 慢 2.3 倍。SoA 入口适合数据本来就是 SoA，或数据驻留 cache 且运算足够贵的情况。
 
 判定标准见 `docs/acceptance-protocol.md`。原始判定表在 `docs/research/raw/ab_campaign_verdict.txt`，每次 `make run` 会覆盖，引用时请连同时刻。
+
+### GLM 本地复测
+
+外部 115 项 GLM 矩阵在本机 Ryzen 5700U 上重跑（gcc 12.4、GLM 0.9.9.8；报告用的是 GLM 1.1.0 + AVX-512 云 Xeon）。默认报告 flag：
+
+| 档 | P 中位数 | B 中位数（8192） | B 几何均值 |
+|---|---|---|---|
+| `-O2` | 0.86x | **2.94x** | 1.58x |
+| `-O3 -march=native` | 0.82x | 1.23x | 1.39x |
+| `-O2 -ffp-contract=off` | **1.00x** | 2.64x | 1.56x |
+| `-O3n -ffp-contract=off` | **1.00x** | 1.11x | 1.39x |
+
+报告里的 0.40x 标量中位数在文档 flag 下已消失；默认 flag 剩余的差距是 FMA/内联契约取舍。批量三个负项都变成胜项：`m3_mul_soa` 5.90x、`m3_inverse_soa` 4.59x、`v2_madd_normalize_soa` 6.55x。`_stream` 在本机翻正（1.1–1.7x，报告云机 0.47–1.03x），正是可移植性提醒。完整表、GLM 版本限制与剩余标量负项（mat3/mat4 inverse、project、slerp、from_mat3）见 [`docs/glm-rebench.md`](docs/glm-rebench.md)。
 
 ### 小批量与流式写入的可移植性
 

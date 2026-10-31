@@ -492,6 +492,11 @@ Evidence:
   byte-identical and the object has **0 `vfmadd`**.
 - `make bench-scalar` (mixed vec2 add/lerp/madd/dot/normalize + vec3 dot + mat3 transform):
   inline is **1.82x** faster at n=8192 and **1.72x** at n=1M than the extern form (A/A floor included).
+- Local 115-item GLM re-run (Ryzen 5700U, gcc 12.4, GLM 0.9.9.8): with the documented
+  `-ffp-contract=off`, the P-group median is **1.00x** (O2 0.995, O3 1.000); with the report's
+  `-ffp-contract=fast` tiers it is 0.86x (O2) / 0.82x (O3). The remaining default-flag gap is the
+  FMA/inline contract: a body with `a + b*c` cannot be forced inline under an FMA caller without
+  letting the caller contract it. See `docs/glm-rebench.md`.
 - `fv_vec2_normalize` still keeps its scalar `sqrtss`/`divss` + zero branch (GCC will not vectorize
   it even inline); P0 removes the call boundary, not that branch. The `_fast` family is the opt-in
   approximate path.
@@ -506,13 +511,21 @@ bit-identical (test_mat3: 122,344 checks).
 `make bench-mat3` (vs per-element `fv_mat3_mul` / `fv_mat3_inverse` calls, 11 paired rounds):
 with the post-P0 **inline** scalar baseline, mul **4.9x** at 8192 and **3.1x** at 1M; inverse **9.7x**
 and **2.7x**. Against the old `FV_USE_EXTERN` baseline the same kernels measured 13.3x / 3.5x and
-14.7x / 3.2x. These are local scalar-call baselines, not the report's GLM ratios; the report's
-`m3_mul_soa` 0.48x at -O2 should be re-measured.
+14.7x / 3.2x. Against GLM (local 115-item re-run): `m3_mul_soa` **5.90x** at `-O2` / 4.18x at `-O3n`
+(8192), 3.88x / 1.27x at 2M; `m3_inverse_soa` **4.59x / 4.59x** at 8192, 2.78x / 2.62x at 2M. The
+report's `m3_mul_soa` 0.48x and `m3_inverse_soa` 0.68-0.98x negatives are gone.
+
+A follow-up found one more compile-tier hole: the plain-C `q_mul_soa` kernel lost vectorization
+under `-O3 -march=native -ffp-contract=off` (0.99x vs GLM at 8192, down from 5.3x). It now has an
+explicit AVX2 kernel (same association order, no FMA), which restores 4.53x at `-O3off` and 5.49x at
+`-O3n` (8192).
 
 ### 10.3 P2: fused fast normalize + optional AVX-512
 
 `fv_vec2_madd_normalize_soa_fast` (rsqrtps + one NR, squared guard, exact scalar fallback) is
-**1.07x** over the exact fused entry at 8192; at 1M it is inside the A/A spread. The exact fused
+**1.07x** over the exact fused entry at 8192; at 1M it is inside the A/A spread. Against GLM the exact
+fused entry is **6.55x** (`-O2`) / 7.50x (`-O3n`) at 8192 (1.09x / 1.16x at 2M). The report's 0.79x
+cell was its AVX-512 cloud, not this machine. The exact fused
 entry gained an optional 16-lane AVX-512 kernel (and the fast fused one too), selected at run time
 by `__builtin_cpu_supports("avx512f")`; `FV_I_NO_AVX512` removes it. This machine is AVX2-only:
 `objdump` confirms 41 `zmm` uses and `vrsqrt14ps`, but the runtime path has not executed on AVX-512
@@ -531,3 +544,26 @@ tier must be fixed when quoting GLM ratios.
 bit-for-bit), `test-scalar-parity-fma` (0 `vfmadd`), test-fast 93,249, mat3 122,344. Header/inline/
 pure-C/FMA forms remain green. The GLM report's 115-item matrix has not been re-run (its `fvbench/`
 source is external); that is the next measurement, not a code item.
+
+
+### 10.6 Local GLM re-run
+
+The external 115-item GLM matrix was re-run on this Ryzen 5700U with the report's own
+`bench_all.cpp` / `summarize_all.py` (GLM 0.9.9.8 from Ubuntu, not the report's 1.1.0; no AVX-512).
+Three rounds x 11 reps, sizes 8192 / 262144 / 2097152; A/A band 0.73-1.29 at 262k, 0.98-1.07 at 2M.
+
+- Default report flags: P median 0.860 (`-O2`), 0.817 (`-O3n`), 0.828 (`-LTO`); B median at 8192
+  2.94x / 1.23x / 1.25x; B geometric mean 1.58x / 1.39x / 1.40x.
+- Documented exact flags (`-ffp-contract=off`): P median 0.995 (`-O2`) / 1.000 (`-O3n`); B median
+  2.64x / 1.11x at 8192; B geometric mean 1.56x / 1.39x.
+- The report's 0.40x scalar median is gone with the documented flag; the default-flag remainder is
+  the deliberate FMA/inline trade. Batch negatives `m3_mul_soa` (5.90x), `m3_inverse_soa` (4.59x) and
+  `v2_madd_normalize_soa` (6.55x) are wins at 8192.
+- Remaining scalar losses in the exact tier are the expensive/guarded entries: `mat3_inverse`
+  0.37-0.76, `mat4_inverse` 0.72-0.78, `vec2_project` 0.24 at O3 (guard blocks vectorization),
+  `quat_slerp` 0.87-0.89, `quat_from_mat3` 0.49 at O3. The batch entries remain the performance path.
+- `_stream` flips sign on this machine (1.1-1.7x vs the report's 0.47-1.03x on its cloud), confirming
+  that it must stay caller-selected.
+- AVX-512 runtime is still unverified; only codegen was checked. The cloud matrix needs a run there.
+
+Full write-up: `docs/glm-rebench.md`.

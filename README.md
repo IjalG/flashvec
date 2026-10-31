@@ -59,6 +59,13 @@ form is `static inline`; use `FV_USE_EXTERN` when you need a stable library symb
 or an ABI boundary. `normalize` keeps its scalar `sqrt`/`div` and zero branch even inline; the
 `_fast` family is the opt-in path for that one.
 
+For the exact form, compile with **`-ffp-contract=off`** (the library's documented default). Then
+every scalar body inlines: the local 115-item GLM re-run has the scalar median at **1.00x** with
+that flag, versus 0.86x (`-O2`) / 0.82x (`-O3n`) under the report's `-ffp-contract=fast` tiers. The difference is the
+contract: a body containing `a + b*c` cannot be forced inline under a caller that allows FMA without
+letting the caller contract it, so it stays out-of-line; the flag makes the caller's optimization
+node match the header's `fp-contract=off` node.
+
 `min`, `max` and `clamp` follow `(a < b) ? a : b` for NaN, not IEEE `fminf`. This is stated in the
 header.
 
@@ -234,9 +241,11 @@ AVX2 kernel with a blend to the identity. The mat3 batch mul/inverse now have th
 mul keeps the nine B columns in registers and computes three output rows at a time; inverse does one
 `vdivps(1/det)` per eight elements (instead of nine scalar divisions) and blends zero for singular
 lanes. Both keep the scalar tail and stay bit-identical to the per-value API. Local
-`make bench-mat3` (default inline scalar baseline, post-P0): mul 4.9x at n=8192 and 3.1x at 1M;
-inverse 9.7x and 2.7x. Against the old `FV_USE_EXTERN` scalar form the same kernels measured 13.3x /
-3.5x and 14.7x / 3.2x. These are local baselines, not the GLM report's ratios.
+`make bench-mat3` (default inline scalar baseline, post-P0): mul 4.9x at n=8192 and 3.1-3.6x at 1M;
+inverse 9.7x and 2.7-3.5x. Against the old `FV_USE_EXTERN` scalar form the same kernels measured 13.3x /
+3.5x and 14.7x / 3.2x. Against GLM's per-element loop (local 115-item re-run): `m3_mul_soa`
+**5.90x** at `-O2` and 4.18x at `-O3n` (8192), 3.88x/1.27x at 2M; `m3_inverse_soa` **4.59x/4.59x**
+at 8192, 2.78x/2.62x at 2M. The report's 0.48x / 0.68x negatives are gone.
 Hand-written intrinsics are limited to the places where the compiler failed or the layout demands
 it: mat4 transform, quaternion normalize, mat3 mul/inverse, the fused normalize kernels, and the
 optional AVX-512 variants. The rule remains: hand-write only after the compiler fails or the
@@ -254,7 +263,8 @@ for angle comparisons, not a libm replacement.
 
 `fv_vec2_madd_normalize_soa_fast` is the fused form of the same approximate path
 (`normalize(a*s + b)`); at n=8192 it is 1.07x over the exact fused entry, and at n=1M it is inside the
-A/A spread. The exact fused entry also has an **optional AVX-512 backend**: 16-lane kernels are
+A/A spread. Against GLM, the exact fused entry is **6.55x** (`-O2`) / 7.50x (`-O3n`) at 8192 and
+1.09x/1.16x at 2M; the report's 0.79x cell was its AVX-512 cloud and is not reproduced here. The exact fused entry also has an **optional AVX-512 backend**: 16-lane kernels are
 compiled under `target("avx512f")` and selected at run time by `__builtin_cpu_supports("avx512f")`;
 the AVX2 path is unchanged and `FV_I_NO_AVX512` removes the backend. This machine has no AVX-512, so
 the codegen is checked (`vrsqrt14ps` / `zmm` present) but the runtime path still needs validation on
@@ -549,6 +559,26 @@ The acceptance criteria are in `docs/acceptance-protocol.md`. The raw verdict ta
 `docs/research/raw/ab_campaign_verdict.txt`, which every `make run` overwrites, so quote it together
 with its timestamp.
 
+### GLM re-run (local)
+
+The external 115-item GLM matrix was re-run on this Ryzen 5700U (gcc 12.4, GLM 0.9.9.8; the report
+used GLM 1.1.0 on a cloud Xeon with AVX-512). Key numbers, default report flags unless noted:
+
+| Tier | P median | B median (8192) | B geomean |
+|---|---|---|---|
+| `-O2` | 0.86x | **2.94x** | 1.58x |
+| `-O3 -march=native` | 0.82x | 1.23x | 1.39x |
+| `-O2 -ffp-contract=off` | **1.00x** | 2.64x | 1.56x |
+| `-O3n -ffp-contract=off` | **1.00x** | 1.11x | 1.39x |
+
+The report's 0.40x scalar median is gone with the documented exact flag; the remaining default-flag
+gap is the FMA/inline contract trade described above. The three batch negatives are now wins:
+`m3_mul_soa` 5.90x at `-O2` (report 0.48x), `m3_inverse_soa` 4.59x (report 0.68-0.98x), and
+`v2_madd_normalize_soa` 6.55x (report 0.79x). `_stream` flips sign on this machine (1.1-1.7x here,
+0.47-1.03x on the report's cloud), which is exactly the portability warning. The full table, the
+GLM-version caveat and the remaining scalar losses (`mat3/mat4 inverse`, `project`, `slerp`,
+`from_mat3`) are in [`docs/glm-rebench.md`](docs/glm-rebench.md).
+
 ### Batch sizing and streaming portability
 
 - The batch API targets **n >= 4**. The external GLM report measured n=1 at roughly tie, n=2 at 0.59x,
@@ -664,6 +694,7 @@ value-semantics, no-allocation contract rather than complete it.
 | [`docs/acceptance-protocol.md`](docs/acceptance-protocol.md) | The five acceptance criteria, the A/A floor, and eight directions that measurements have already settled |
 | [`docs/optimization-report.md`](docs/optimization-report.md) | Full optimization analysis with evidence |
 | [`docs/implementation-log.md`](docs/implementation-log.md) | What was landed, in what order, with the acceptance evidence for each step |
+| [`docs/glm-rebench.md`](docs/glm-rebench.md) | Local re-run of the external 115-item GLM matrix, with the machine/GLM-version caveats |
 | [`bench/ab/README.md`](bench/ab/README.md) | The same-process A/B harness: how it works and where it lies |
 | [`verify/README.md`](verify/README.md) | Independent verification and benchmarks |
 | [`docs/research/`](docs/research/README.md) | Research notes (Chinese, kept for provenance) |

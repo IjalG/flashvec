@@ -87,6 +87,15 @@
 #define FV_I_AVX512 0
 #endif
 
+/* A scalar body that must inline even when the consumer's optimization node differs (the scalar
+ * definitions sit under the fp-contract=off pragma, so without this GCC keeps an out-of-line copy at
+ * -O2). The pragma still wins: the inlined body has no FMA. */
+#if defined(__GNUC__) || defined(__clang__)
+#define FV_I_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define FV_I_ALWAYS_INLINE
+#endif
+
 #if FV_I_INTRINSICS && !defined(FV_USE_EXTERN)
 #include <immintrin.h>
 #endif
@@ -1186,6 +1195,7 @@ void fv_vec2_madd_normalize_soa_fast(const float *__restrict ax, const float *__
 #if FV_I_AVX512
 #define FV_I_TARGET_AVX512 __attribute__((target("avx512f")))
 #endif
+
 #endif
 
 /* ======== first section: no mul+add contraction risk (outside the pragma -> fully inlined under the consumer's default options) ======== */
@@ -2322,7 +2332,7 @@ static inline fv_real fv_i_sc_clamp1(fv_real x, fv_real lo, fv_real hi)
 
 /* ---------------- 2D ---------------- */
 
-static inline fv_vec2 fv_vec2_make(fv_real x, fv_real y)
+static inline FV_I_ALWAYS_INLINE fv_vec2 fv_vec2_make(fv_real x, fv_real y)
 {
     fv_vec2 v;
     v.x = x;
@@ -2330,22 +2340,22 @@ static inline fv_vec2 fv_vec2_make(fv_real x, fv_real y)
     return v;
 }
 
-static inline fv_vec2 fv_vec2_add(fv_vec2 a, fv_vec2 b)
+static inline FV_I_ALWAYS_INLINE fv_vec2 fv_vec2_add(fv_vec2 a, fv_vec2 b)
 {
     return fv_vec2_make(a.x + b.x, a.y + b.y);
 }
 
-static inline fv_vec2 fv_vec2_sub(fv_vec2 a, fv_vec2 b)
+static inline FV_I_ALWAYS_INLINE fv_vec2 fv_vec2_sub(fv_vec2 a, fv_vec2 b)
 {
     return fv_vec2_make(a.x - b.x, a.y - b.y);
 }
 
-static inline fv_vec2 fv_vec2_neg(fv_vec2 v)
+static inline FV_I_ALWAYS_INLINE fv_vec2 fv_vec2_neg(fv_vec2 v)
 {
     return fv_vec2_make(-v.x, -v.y);
 }
 
-static inline fv_vec2 fv_vec2_scale(fv_vec2 v, fv_real s)
+static inline FV_I_ALWAYS_INLINE fv_vec2 fv_vec2_scale(fv_vec2 v, fv_real s)
 {
     return fv_vec2_make(v.x * s, v.y * s);
 }
@@ -2355,19 +2365,19 @@ static inline fv_vec2 fv_vec2_lerp(fv_vec2 a, fv_vec2 b, fv_real t)
     return fv_vec2_make(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
 }
 
-static inline fv_vec2 fv_vec2_min(fv_vec2 a, fv_vec2 b)
+static inline FV_I_ALWAYS_INLINE fv_vec2 fv_vec2_min(fv_vec2 a, fv_vec2 b)
 {
     return fv_vec2_make(a.x < b.x ? a.x : b.x,
                         a.y < b.y ? a.y : b.y);
 }
 
-static inline fv_vec2 fv_vec2_max(fv_vec2 a, fv_vec2 b)
+static inline FV_I_ALWAYS_INLINE fv_vec2 fv_vec2_max(fv_vec2 a, fv_vec2 b)
 {
     return fv_vec2_make(a.x > b.x ? a.x : b.x,
                         a.y > b.y ? a.y : b.y);
 }
 
-static inline fv_vec2 fv_vec2_clamp(fv_vec2 v, fv_vec2 lo, fv_vec2 hi)
+static inline FV_I_ALWAYS_INLINE fv_vec2 fv_vec2_clamp(fv_vec2 v, fv_vec2 lo, fv_vec2 hi)
 {
     return fv_vec2_make(fv_i_sc_clamp1(v.x, lo.x, hi.x),
                         fv_i_sc_clamp1(v.y, lo.y, hi.y));
@@ -2426,7 +2436,7 @@ static inline fv_vec2 fv_vec2_project(fv_vec2 v, fv_vec2 onto)
     return fv_vec2_scale(onto, fv_vec2_dot(v, onto) / denom);
 }
 
-static inline int fv_vec2_near(fv_vec2 a, fv_vec2 b, fv_real eps)
+static inline FV_I_ALWAYS_INLINE int fv_vec2_near(fv_vec2 a, fv_vec2 b, fv_real eps)
 {
     if (fv_i_sc_abs(a.x - b.x) > eps) {
         return 0;
@@ -2439,7 +2449,7 @@ static inline int fv_vec2_near(fv_vec2 a, fv_vec2 b, fv_real eps)
 
 /* ---------------- 3D ---------------- */
 
-static inline fv_vec3 fv_vec3_make(fv_real x, fv_real y, fv_real z)
+static inline FV_I_ALWAYS_INLINE fv_vec3 fv_vec3_make(fv_real x, fv_real y, fv_real z)
 {
     fv_vec3 v;
     v.x = x;
@@ -2448,22 +2458,22 @@ static inline fv_vec3 fv_vec3_make(fv_real x, fv_real y, fv_real z)
     return v;
 }
 
-static inline fv_vec3 fv_vec3_add(fv_vec3 a, fv_vec3 b)
+static inline FV_I_ALWAYS_INLINE fv_vec3 fv_vec3_add(fv_vec3 a, fv_vec3 b)
 {
     return fv_vec3_make(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 
-static inline fv_vec3 fv_vec3_sub(fv_vec3 a, fv_vec3 b)
+static inline FV_I_ALWAYS_INLINE fv_vec3 fv_vec3_sub(fv_vec3 a, fv_vec3 b)
 {
     return fv_vec3_make(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-static inline fv_vec3 fv_vec3_neg(fv_vec3 v)
+static inline FV_I_ALWAYS_INLINE fv_vec3 fv_vec3_neg(fv_vec3 v)
 {
     return fv_vec3_make(-v.x, -v.y, -v.z);
 }
 
-static inline fv_vec3 fv_vec3_scale(fv_vec3 v, fv_real s)
+static inline FV_I_ALWAYS_INLINE fv_vec3 fv_vec3_scale(fv_vec3 v, fv_real s)
 {
     return fv_vec3_make(v.x * s, v.y * s, v.z * s);
 }
@@ -2475,21 +2485,21 @@ static inline fv_vec3 fv_vec3_lerp(fv_vec3 a, fv_vec3 b, fv_real t)
                         a.z + (b.z - a.z) * t);
 }
 
-static inline fv_vec3 fv_vec3_min(fv_vec3 a, fv_vec3 b)
+static inline FV_I_ALWAYS_INLINE fv_vec3 fv_vec3_min(fv_vec3 a, fv_vec3 b)
 {
     return fv_vec3_make(a.x < b.x ? a.x : b.x,
                         a.y < b.y ? a.y : b.y,
                         a.z < b.z ? a.z : b.z);
 }
 
-static inline fv_vec3 fv_vec3_max(fv_vec3 a, fv_vec3 b)
+static inline FV_I_ALWAYS_INLINE fv_vec3 fv_vec3_max(fv_vec3 a, fv_vec3 b)
 {
     return fv_vec3_make(a.x > b.x ? a.x : b.x,
                         a.y > b.y ? a.y : b.y,
                         a.z > b.z ? a.z : b.z);
 }
 
-static inline fv_vec3 fv_vec3_clamp(fv_vec3 v, fv_vec3 lo, fv_vec3 hi)
+static inline FV_I_ALWAYS_INLINE fv_vec3 fv_vec3_clamp(fv_vec3 v, fv_vec3 lo, fv_vec3 hi)
 {
     return fv_vec3_make(fv_i_sc_clamp1(v.x, lo.x, hi.x),
                         fv_i_sc_clamp1(v.y, lo.y, hi.y),
@@ -2557,7 +2567,7 @@ static inline fv_vec3 fv_vec3_cross(fv_vec3 a, fv_vec3 b)
                         a.x * b.y - a.y * b.x);
 }
 
-static inline int fv_vec3_near(fv_vec3 a, fv_vec3 b, fv_real eps)
+static inline FV_I_ALWAYS_INLINE int fv_vec3_near(fv_vec3 a, fv_vec3 b, fv_real eps)
 {
     if (fv_i_sc_abs(a.x - b.x) > eps) {
         return 0;
@@ -2573,7 +2583,7 @@ static inline int fv_vec3_near(fv_vec3 a, fv_vec3 b, fv_real eps)
 
 /* ---------------- 2D bounding box (for broad-phase) ---------------- */
 
-static inline fv_aabb2 fv_aabb2_merge(fv_aabb2 box, fv_vec2 p)
+static inline FV_I_ALWAYS_INLINE fv_aabb2 fv_aabb2_merge(fv_aabb2 box, fv_vec2 p)
 {
     fv_aabb2 r;
     r.lo = fv_vec2_min(box.lo, p);
@@ -2581,7 +2591,7 @@ static inline fv_aabb2 fv_aabb2_merge(fv_aabb2 box, fv_vec2 p)
     return r;
 }
 
-static inline int fv_aabb2_overlaps(fv_aabb2 a, fv_aabb2 b)
+static inline FV_I_ALWAYS_INLINE int fv_aabb2_overlaps(fv_aabb2 a, fv_aabb2 b)
 {
     if (a.lo.x > b.hi.x || b.lo.x > a.hi.x) {
         return 0;
@@ -2616,7 +2626,7 @@ static inline fv_real fv_i_sc_clamp1_4(fv_real x, fv_real lo, fv_real hi)
     return x;
 }
 
-static inline fv_vec4 fv_vec4_make(fv_real x, fv_real y, fv_real z, fv_real w)
+static inline FV_I_ALWAYS_INLINE fv_vec4 fv_vec4_make(fv_real x, fv_real y, fv_real z, fv_real w)
 {
     fv_vec4 v;
     v.x = x;
@@ -2626,22 +2636,22 @@ static inline fv_vec4 fv_vec4_make(fv_real x, fv_real y, fv_real z, fv_real w)
     return v;
 }
 
-static inline fv_vec4 fv_vec4_add(fv_vec4 a, fv_vec4 b)
+static inline FV_I_ALWAYS_INLINE fv_vec4 fv_vec4_add(fv_vec4 a, fv_vec4 b)
 {
     return fv_vec4_make(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
 }
 
-static inline fv_vec4 fv_vec4_sub(fv_vec4 a, fv_vec4 b)
+static inline FV_I_ALWAYS_INLINE fv_vec4 fv_vec4_sub(fv_vec4 a, fv_vec4 b)
 {
     return fv_vec4_make(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
 }
 
-static inline fv_vec4 fv_vec4_neg(fv_vec4 v)
+static inline FV_I_ALWAYS_INLINE fv_vec4 fv_vec4_neg(fv_vec4 v)
 {
     return fv_vec4_make(-v.x, -v.y, -v.z, -v.w);
 }
 
-static inline fv_vec4 fv_vec4_scale(fv_vec4 v, fv_real s)
+static inline FV_I_ALWAYS_INLINE fv_vec4 fv_vec4_scale(fv_vec4 v, fv_real s)
 {
     return fv_vec4_make(v.x * s, v.y * s, v.z * s, v.w * s);
 }
@@ -2655,7 +2665,7 @@ static inline fv_vec4 fv_vec4_lerp(fv_vec4 a, fv_vec4 b, fv_real t)
 }
 
 /* The NaN rule is exactly that of fv_vec2_min / fv_vec3_min: (a < b) ? a : b, not IEEE minNum. */
-static inline fv_vec4 fv_vec4_min(fv_vec4 a, fv_vec4 b)
+static inline FV_I_ALWAYS_INLINE fv_vec4 fv_vec4_min(fv_vec4 a, fv_vec4 b)
 {
     return fv_vec4_make(a.x < b.x ? a.x : b.x,
                         a.y < b.y ? a.y : b.y,
@@ -2663,7 +2673,7 @@ static inline fv_vec4 fv_vec4_min(fv_vec4 a, fv_vec4 b)
                         a.w < b.w ? a.w : b.w);
 }
 
-static inline fv_vec4 fv_vec4_max(fv_vec4 a, fv_vec4 b)
+static inline FV_I_ALWAYS_INLINE fv_vec4 fv_vec4_max(fv_vec4 a, fv_vec4 b)
 {
     return fv_vec4_make(a.x > b.x ? a.x : b.x,
                         a.y > b.y ? a.y : b.y,
@@ -2671,7 +2681,7 @@ static inline fv_vec4 fv_vec4_max(fv_vec4 a, fv_vec4 b)
                         a.w > b.w ? a.w : b.w);
 }
 
-static inline fv_vec4 fv_vec4_clamp(fv_vec4 v, fv_vec4 lo, fv_vec4 hi)
+static inline FV_I_ALWAYS_INLINE fv_vec4 fv_vec4_clamp(fv_vec4 v, fv_vec4 lo, fv_vec4 hi)
 {
     return fv_vec4_make(fv_i_sc_clamp1_4(v.x, lo.x, hi.x),
                         fv_i_sc_clamp1_4(v.y, lo.y, hi.y),
@@ -2736,7 +2746,7 @@ static inline fv_vec4 fv_vec4_project(fv_vec4 v, fv_vec4 onto)
     return fv_vec4_scale(onto, fv_vec4_dot(v, onto) / denom);
 }
 
-static inline int fv_vec4_near(fv_vec4 a, fv_vec4 b, fv_real eps)
+static inline FV_I_ALWAYS_INLINE int fv_vec4_near(fv_vec4 a, fv_vec4 b, fv_real eps)
 {
     if (fv_i_sc_abs4(a.x - b.x) > eps) {
         return 0;
@@ -2754,7 +2764,7 @@ static inline int fv_vec4_near(fv_vec4 a, fv_vec4 b, fv_real eps)
 }
 
 
-static inline fv_quat fv_quat_make(fv_real x, fv_real y, fv_real z, fv_real w)
+static inline FV_I_ALWAYS_INLINE fv_quat fv_quat_make(fv_real x, fv_real y, fv_real z, fv_real w)
 {
     fv_quat q;
     q.x = x;
@@ -2764,22 +2774,22 @@ static inline fv_quat fv_quat_make(fv_real x, fv_real y, fv_real z, fv_real w)
     return q;
 }
 
-static inline fv_quat fv_quat_add(fv_quat a, fv_quat b)
+static inline FV_I_ALWAYS_INLINE fv_quat fv_quat_add(fv_quat a, fv_quat b)
 {
     return fv_quat_make(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
 }
 
-static inline fv_quat fv_quat_sub(fv_quat a, fv_quat b)
+static inline FV_I_ALWAYS_INLINE fv_quat fv_quat_sub(fv_quat a, fv_quat b)
 {
     return fv_quat_make(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
 }
 
-static inline fv_quat fv_quat_neg(fv_quat q)
+static inline FV_I_ALWAYS_INLINE fv_quat fv_quat_neg(fv_quat q)
 {
     return fv_quat_make(-q.x, -q.y, -q.z, -q.w);
 }
 
-static inline fv_quat fv_quat_scale(fv_quat q, fv_real s)
+static inline FV_I_ALWAYS_INLINE fv_quat fv_quat_scale(fv_quat q, fv_real s)
 {
     return fv_quat_make(q.x * s, q.y * s, q.z * s, q.w * s);
 }
@@ -2815,7 +2825,7 @@ static inline fv_quat fv_quat_normalize(fv_quat q)
     }
 }
 
-static inline fv_quat fv_quat_conjugate(fv_quat q)
+static inline FV_I_ALWAYS_INLINE fv_quat fv_quat_conjugate(fv_quat q)
 {
     return fv_quat_make(-q.x, -q.y, -q.z, q.w);
 }
@@ -2982,7 +2992,7 @@ static inline fv_quat fv_quat_from_euler_xyz(fv_real x, fv_real y, fv_real z)
 }
 
 
-static inline fv_mat3 fv_mat3_from_rows(fv_vec3 r0, fv_vec3 r1, fv_vec3 r2)
+static inline FV_I_ALWAYS_INLINE fv_mat3 fv_mat3_from_rows(fv_vec3 r0, fv_vec3 r1, fv_vec3 r2)
 {
     fv_mat3 m;
     m.m[0] = r0.x;
@@ -3021,7 +3031,7 @@ static inline fv_mat3 fv_mat3_mul(const fv_mat3 *a, const fv_mat3 *b)
     return r;
 }
 
-static inline fv_mat3 fv_mat3_transpose(const fv_mat3 *m)
+static inline FV_I_ALWAYS_INLINE fv_mat3 fv_mat3_transpose(const fv_mat3 *m)
 {
     fv_mat3 r;
     int i;
@@ -5199,11 +5209,11 @@ static inline void fv_i_maddv_x4_stream(const fv_vec2 *__restrict a, const fv_ve
 /* ---------------- quaternion / mat3 SoA batch: scalar helpers, kernels, dispatch (P6) ----------------
  * The expressions below are the single reference for bit-exactness: the per-value API in
  * src/flashvec_quat.cpp / src/flashvec_mat3.cpp writes the same lines, and this section's tail and
- * target("avx2") loop both call these helpers. The multiply / rotate / mat3-transform kernels are
- * deliberately plain C: they are elementwise loops with no reductions, so GCC's vectorizer is the first
- * implementation to measure; a hand-written kernel is added only if the instruction count / vpermps
- * evidence shows it failing (the mat4 rule). Quat normalize is that exception: the compiler kept
- * sqrtss/divss and a branch (0 ymm instructions), so it has an explicit kernel below. The pragma around
+ * target("avx2") loop both call these helpers. Quat multiply and normalize have explicit kernels:
+ * mul because GCC 12 lost the plain-C loop under -O3 -march=native -ffp-contract=off (q_mul_soa fell
+ * from ~5x to ~1x vs GLM), normalize because the compiler kept sqrtss/divss and a branch. Rotate and
+ * mat3-transform stay plain C; a hand-written kernel is added only if the instruction count / vpermps
+ * evidence shows it failing (the mat4 rule). The pragma around
  * this section is what makes the result independent of a consumer's -mfma / -ffp-contract=fast, exactly
  * as it does for lerp / madd / normalize.
  */
@@ -5269,9 +5279,10 @@ static inline void fv_i_s_mat3_tf3(fv_real m00, fv_real m01, fv_real m02,
 
 #if FV_I_INTRINSICS
 
-/* Plain C inside target("avx2"): GCC vectorizes the loop at 256 bits. Eight independent elements per
- * iteration (one per float lane); the helpers are static inline and the stores are to distinct arrays,
- * so the loop has no loop-carried dependency. */
+/* Explicit AVX2: the plain-C form vectorizes under the default tier but GCC 12 at
+ * -O3 -march=native -ffp-contract=off loses the loop (measured: q_mul_soa fell from ~5x to ~1x vs
+ * GLM). The arithmetic is the scalar expression lane by lane, no FMA; this keeps the kernel stable
+ * across compile flags. */
 FV_I_TARGET_AVX2 static inline void fv_i_quat_mul_soa_avx2(const float *__restrict ax,
                                                            const float *__restrict ay,
                                                            const float *__restrict az,
@@ -5284,8 +5295,31 @@ FV_I_TARGET_AVX2 static inline void fv_i_quat_mul_soa_avx2(const float *__restri
                                                            float *__restrict oz, float *__restrict ow,
                                                            size_t n)
 {
-    size_t i;
-    for (i = 0; i < n; ++i) {
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 vax = _mm256_loadu_ps(ax + i);
+        __m256 vay = _mm256_loadu_ps(ay + i);
+        __m256 vaz = _mm256_loadu_ps(az + i);
+        __m256 vaw = _mm256_loadu_ps(aw + i);
+        __m256 vbx = _mm256_loadu_ps(bx + i);
+        __m256 vby = _mm256_loadu_ps(by + i);
+        __m256 vbz = _mm256_loadu_ps(bz + i);
+        __m256 vbw = _mm256_loadu_ps(bw + i);
+        __m256 tx = _mm256_add_ps(_mm256_add_ps(_mm256_mul_ps(vaw, vbx), _mm256_mul_ps(vax, vbw)),
+                                  _mm256_mul_ps(vay, vbz));
+        tx = _mm256_sub_ps(tx, _mm256_mul_ps(vaz, vby));
+        __m256 ty = _mm256_sub_ps(_mm256_mul_ps(vaw, vby), _mm256_mul_ps(vax, vbz));
+        ty = _mm256_add_ps(_mm256_add_ps(ty, _mm256_mul_ps(vay, vbw)), _mm256_mul_ps(vaz, vbx));
+        __m256 tz = _mm256_add_ps(_mm256_mul_ps(vaw, vbz), _mm256_mul_ps(vax, vby));
+        tz = _mm256_add_ps(_mm256_sub_ps(tz, _mm256_mul_ps(vay, vbx)), _mm256_mul_ps(vaz, vbw));
+        __m256 tw = _mm256_sub_ps(_mm256_mul_ps(vaw, vbw), _mm256_mul_ps(vax, vbx));
+        tw = _mm256_sub_ps(_mm256_sub_ps(tw, _mm256_mul_ps(vay, vby)), _mm256_mul_ps(vaz, vbz));
+        _mm256_storeu_ps(ox + i, tx);
+        _mm256_storeu_ps(oy + i, ty);
+        _mm256_storeu_ps(oz + i, tz);
+        _mm256_storeu_ps(ow + i, tw);
+    }
+    for (; i < n; ++i) {
         fv_i_s_quat_mul(ax[i], ay[i], az[i], aw[i], bx[i], by[i], bz[i], bw[i],
                         &ox[i], &oy[i], &oz[i], &ow[i]);
     }
