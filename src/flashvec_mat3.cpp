@@ -1,3 +1,4 @@
+#define FV_BUILD 1
 /* The scalar implementation of fv_mat3 -- the 3x3 linear-algebra half of the physics primitives.
  *
  * Same rules as src/flashvec.cpp / src/flashvec_vec4.cpp / src/flashvec_quat.cpp: compiled as C++, C

@@ -1,3 +1,4 @@
+#define FV_BUILD 1
 /* Implementation of flashvec: compiled as C++, using only the C language subset. */
 #include "flashvec.h"
 

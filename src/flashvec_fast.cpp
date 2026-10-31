@@ -1,3 +1,4 @@
+#define FV_BUILD 1
 /* Approximate math entries -- currently fv_atan_approx.
  *
  * The polynomial is the standard 5-term atan approximation on [-1, 1]:

@@ -50,6 +50,15 @@ On top of those, all three types have `addmul` (`x + v*s`), and `fv_vec2` alone 
 
 The bounding box adds `fv_aabb2_merge` and `fv_aabb2_overlaps`.
 
+The default form defines every scalar body as `static inline` in the header, under the same
+`fp-contract=off` pragma as the batch kernels; `FV_USE_EXTERN` switches to the library symbols, and
+the two forms are bit-identical (`make test-scalar-parity`). A mixed scalar loop measured with
+`make bench-scalar` is **1.70-1.82x** faster in the default form than in the `FV_USE_EXTERN` form,
+and a consumer compiled with `-mfma -ffp-contract=fast` still emits **0 `vfmadd`**. The default
+form is `static inline`; use `FV_USE_EXTERN` when you need a stable library symbol / function address,
+or an ABI boundary. `normalize` keeps its scalar `sqrt`/`div` and zero branch even inline; the
+`_fast` family is the opt-in path for that one.
+
 `min`, `max` and `clamp` follow `(a < b) ? a : b` for NaN, not IEEE `fminf`. This is stated in the
 header.
 
@@ -221,10 +230,17 @@ Implementation note: quaternion multiply, rotate-vector and mat3 transform are *
 `target("avx2")` function -- GCC vectorizes them at 256 bits with zero shuffles (measured 40 / 40 / 21
 AVX2 instructions including loads and stores, 0 `vpermps`/`vshufps`). Quaternion normalize was the one
 loop the compiler refused to vectorize (it kept `sqrtss`/`divss` and a branch), so it has an explicit
-AVX2 kernel with a blend to the identity. The mat3 batch mul/inverse are gather/scatter loops by nature
-(nine streams each way), so they stay scalar; the batch form's win there is the removed call boundary.
-No hand-written intrinsic is used anywhere else; the rule is the same as the rest of the library:
-hand-write only after the compiler fails.
+AVX2 kernel with a blend to the identity. The mat3 batch mul/inverse now have their own AVX2 kernels:
+mul keeps the nine B columns in registers and computes three output rows at a time; inverse does one
+`vdivps(1/det)` per eight elements (instead of nine scalar divisions) and blends zero for singular
+lanes. Both keep the scalar tail and stay bit-identical to the per-value API. Local
+`make bench-mat3` (default inline scalar baseline, post-P0): mul 4.9x at n=8192 and 3.1x at 1M;
+inverse 9.7x and 2.7x. Against the old `FV_USE_EXTERN` scalar form the same kernels measured 13.3x /
+3.5x and 14.7x / 3.2x. These are local baselines, not the GLM report's ratios.
+Hand-written intrinsics are limited to the places where the compiler failed or the layout demands
+it: mat4 transform, quaternion normalize, mat3 mul/inverse, the fused normalize kernels, and the
+optional AVX-512 variants. The rule remains: hand-write only after the compiler fails or the
+gather/scatter shape makes auto-vectorization impossible.
 
 ### Approximate entries
 
@@ -236,10 +252,20 @@ inside the run's A/A spread, so read that tier as inconclusive. `fv_atan_approx`
 polynomial on `[-1,1]` (max abs error ~1.2e-5, NaN outside the domain); it is the intended fast path
 for angle comparisons, not a libm replacement.
 
+`fv_vec2_madd_normalize_soa_fast` is the fused form of the same approximate path
+(`normalize(a*s + b)`); at n=8192 it is 1.07x over the exact fused entry, and at n=1M it is inside the
+A/A spread. The exact fused entry also has an **optional AVX-512 backend**: 16-lane kernels are
+compiled under `target("avx512f")` and selected at run time by `__builtin_cpu_supports("avx512f")`;
+the AVX2 path is unchanged and `FV_I_NO_AVX512` removes the backend. This machine has no AVX-512, so
+the codegen is checked (`vrsqrt14ps` / `zmm` present) but the runtime path still needs validation on
+AVX-512 hardware.
+
 ### Preliminary measurements
 
 `make bench-physics`, same-process interleaved A/B, 11 paired rounds, `taskset -c 0`, medians of two
-runs. Baseline is the per-element library call (cross-TU, not inlinable). The same-round A/A floor was
+runs. These tables predate P0: their baseline is the **`FV_USE_EXTERN`** scalar form (a cross-TU call).
+Since P0 the default scalar form is header-inline, so a batch-vs-default-scalar ratio is smaller;
+the table stays valid for the old/extern baseline. The same-round A/A floor was
 0.99-1.00 at n=8192 and 0.93-1.07 at n=1M.
 
 | Entry | n = 8192 (L2) | n = 1M (32-60 MiB working set) |
@@ -381,9 +407,11 @@ that size; what is left is the traffic itself.
 
 ### Speedup over scalar calls
 
-The baseline is **calling the library's scalar function per element**, which is a cross-TU call that
-cannot be inlined. Writing the loop yourself in the same translation unit lets GCC auto-vectorize
-it, and the gap shrinks a lot (`dot` comes down to roughly 4x).
+The table below uses the historical **`FV_USE_EXTERN`** baseline: calling the library's scalar
+function per element, a cross-TU call that cannot be inlined. Since P0 the default scalar form is
+header-inline, so a loop written against `fv_vec2_add` etc. now auto-vectorizes too; the table is
+kept as the old-baseline record, not as the default-form ratio. `make bench-scalar` measures the two
+scalar forms directly (1.70-1.82x for the mixed workload).
 
 N = 8192, 32 KB per array, L2 resident:
 
@@ -481,8 +509,10 @@ at n=1M (the `vec4_add` 8192 A/A spread was wider, 0.15-1.17, but the A/B ratio 
 | `fv_vec4_scale_x2` | 25.3x | 2.05x |
 | `fv_vec4_normalize_soa` | 38.8x | 4.34x |
 
-These are the absolute speedups over scalar calls, so they answer the question the earlier document
-left open. At n=1M the working set is DRAM-bound and the ratios converge toward the memory ceiling.
+These are absolute speedups over the **pre-P0 `FV_USE_EXTERN` scalar form**, so they answer the
+question the earlier document left open; since P0 the default scalar form is inline, so a fresh
+comparison against it is narrower. At n=1M the working set is DRAM-bound and the ratios converge
+toward the memory ceiling.
 
 ### `_fast` normalize
 
@@ -499,11 +529,12 @@ noise band and should be read as "no worse", not as a measured speedup.
 ### Reading these numbers
 
 - Always report the working set alongside a speedup. At N = 1<<20 (24 MB) the three implementation
-  tiers converge to 1.0–1.5x, limited by this machine's 6–7 GB/s streaming bandwidth. Batch-vs-scalar
-  ratios stay larger because that baseline is a cross-TU call, as the 3D/4D table above shows.
-- Most of the gain comes from removing cross-TU call boundaries, not from intrinsics. Once the same
-  math is inlined from the header, `-O3 -march=native` auto-vectorization nearly matches hand-
-  written AVX2.
+  tiers converge to 1.0–1.5x, limited by this machine's 6–7 GB/s streaming bandwidth. Historical
+  batch-vs-scalar ratios are larger because that baseline was the `FV_USE_EXTERN` cross-TU call;
+  since P0 the default scalar form is header-inline, so quote the baseline with the number.
+- The historical gain came mostly from removing the cross-TU call boundary, not from intrinsics.
+  Once the same math is inlined from the header, `-O3 -march=native` auto-vectorization nearly matches
+  hand-written AVX2. P0 applies that lesson to the scalar API itself.
 - This machine carries persistent external load, so the same code can vary 20–25% between runs.
   Never compare absolute values across fixtures; only ratios within one run are meaningful.
 - The 3D / 4D absolute speedups are now measured by `make bench-vec34` (table above); like every
@@ -518,15 +549,28 @@ The acceptance criteria are in `docs/acceptance-protocol.md`. The raw verdict ta
 `docs/research/raw/ab_campaign_verdict.txt`, which every `make run` overwrites, so quote it together
 with its timestamp.
 
+### Batch sizing and streaming portability
+
+- The batch API targets **n >= 4**. The external GLM report measured n=1 at roughly tie, n=2 at 0.59x,
+  and n=4 and up at 2x or better; below 4 elements the call/guard overhead is the whole cost. Use the
+  scalar API for one or two elements.
+- `_stream` is not portable across machines in sign. It pays only when the working set is beyond L3
+  and the machine is RFO-limited; on a bandwidth-rich, read-bound machine it loses (the report's
+  machine: 0.47-1.03x). The library never switches automatically; measure with `bench/membw.c` first.
+- Compile tier changes GLM's auto-vectorization far more than flashvec's kernels: quote a ratio only
+  with `-O2` vs `-O3 -march=native` fixed, and do not compare single points across tiers.
+
 ## Building and testing
 
 ```bash
 make                         # build/libflashvec.a
-make test-all                # full suite: 1.86M checks (tests/count_checks.sh reproduces the total)
+make test-all                # full suite: 1.97M checks (tests/count_checks.sh reproduces the total)
 
 make test-header             # strict compile settings + double inclusion
 make test-inline             # default form vs FV_USE_EXTERN form, byte for byte
-make test-fma                # still bit-identical for a -march=native -mfma consumer
+make test-scalar-parity      # scalar API: header-inline vs library symbols, byte for byte
+make test-scalar-parity-fma  # scalar API: -mfma consumer still bit-identical, 0 vfmadd
+make test-fma                # batch entries: still bit-identical for a -march=native -mfma consumer
 make test-inline-effects     # survey of what inlines and what does not
 make test-stream             # regression for _stream and _mask_inplace
 make test-physics            # quat + mat3, all forms (C/C++ inline/extern/pure-C/FMA)
@@ -539,6 +583,8 @@ make bench-physics           # per-element calls vs SoA batch, same-process A/B
 make bench-fast              # exact vs _fast normalize
 make bench-vec34             # 3D / 4D absolute speedup over scalar calls
 make bench-pack              # AoS <-> SoA conversion cost and the SoA decision rule
+make bench-mat3              # mat3 AVX2 mul/inverse vs per-element scalar calls
+make bench-scalar            # scalar inline vs FV_USE_EXTERN library calls
 make test-vec4               # 4D scalar and batch
 make test-vec34-inline       # 3D/4D batch shape comparison
 make test-refactor           # all of the above plus symbol list and disassembly survey
@@ -554,14 +600,17 @@ containing `sqrtf` vectorize, with no change to a single bit.
 
 `-ffp-contract=off` forbids contracting `a + b*c` into an FMA. Contraction would make the same
 expression differ by 1 ulp across translation units or targets. The header adds `#pragma GCC
-optimize("fp-contract=off")` as a second line of defence.
+optimize("fp-contract=off")` as a second line of defence; since P0 it covers the inline scalar
+definitions as well, which is why a `-mfma -ffp-contract=fast` consumer still emits no `vfmadd`
+for them.
 
 `-march=native`, `-mavx2` and `-ffast-math` are not used. The default build stays on the x86-64
 baseline. `-ffast-math` is not merely unnecessary: measured, it gives no speedup anywhere, makes
 `normalize_soa` 15–17% slower at L1/L2 sizes, and changes 32.5% of output bit patterns. See
-`docs/acceptance-protocol.md` §9 item 7. AVX2 is enabled only inside the header, through function-level `target("avx2")` attributes
-plus runtime dispatch on `__builtin_cpu_supports`. Machines without AVX2, and every tail, take the
-scalar path with identical results.
+`docs/acceptance-protocol.md` §9 item 7. AVX2 is enabled only inside the header, through function-level
+`target("avx2")` attributes plus runtime dispatch on `__builtin_cpu_supports`. The optional AVX-512
+backend uses `target("avx512f")` and `__builtin_cpu_supports("avx512f")`; `FV_I_NO_AVX512` removes it.
+Machines without AVX2, and every tail, take the scalar path with identical results.
 
 ## Design notes
 
@@ -571,12 +620,14 @@ The header is a pure C interface with `extern "C"` guards. The implementation is
 only uses the C language subset. Introducing C++ features later requires neither a toolchain change
 nor an ABI change.
 
-### Batch entry points live in the header
+### Entry points live in the header
 
-The cross-TU call boundary is a measured first-order bottleneck, and a caller linking a static
-library cannot remove it. So the implementation is written once, in the header, while
-`src/flashvec_batch.cpp` keeps same-named `extern` symbols for the `FV_USE_EXTERN` form and for
-already-compiled callers.
+The cross-TU call boundary was a measured first-order bottleneck that a caller linking a static
+library could not remove; moving the bodies into the header is the fix. The batch kernels and, since
+P0, the scalar bodies are written in the
+header as `static inline`; `src/*.cpp` keeps same-named `extern` symbols for the `FV_USE_EXTERN`
+form, for `FV_BUILD`, and for already-compiled callers. The scalar and batch forms are compared
+bit-for-bit by `tests/test_scalar_parity.c` and `tests/test_parity.c`.
 
 The cost is that the header conditionally includes `<immintrin.h>` on supported targets. With a pure
 C compiler, or with `FV_USE_EXTERN` defined, it remains a declaration-only header.
@@ -596,11 +647,14 @@ effects` pins this contract down as a reproducible assertion.
 
 The library now covers the vector types and their scalar / batch APIs, quaternions, 3x3 and general
 4x4 matrices, quaternion interpolation and angle constructors, the `_fast` approximate normalize
-family, and `fv_atan_approx`. There is no pending backlog list in this document.
+family, `fv_atan_approx`, and the optional AVX-512 path for the fused madd-normalize entry. There is
+no pending backlog list in this document.
 
 What is deliberately **outside** the scope, not pending: threading / scheduling and other engine
 facilities, allocation or arena ownership (the library never allocates), a double-precision batch
-family, and a `_fast` variant of every entry (only normalize has one). Those would change the
+family, and a `_fast` variant of every entry (only normalize and the fused madd-normalize have one).
+The AVX-512 backend is opt-in/runtime-dispatched; on this AVX2-only machine its codegen is checked but
+its runtime path awaits AVX-512 hardware validation. Those scope choices would change the
 value-semantics, no-allocation contract rather than complete it.
 
 ## Documentation

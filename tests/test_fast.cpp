@@ -161,6 +161,18 @@ static void test_quat(size_t n)
     }
 }
 
+static void test_madd_norm(size_t n)
+{
+    size_t i;
+    fill(n);
+    fv_vec2_madd_normalize_soa(g_ax, g_ay, g_az, g_aw, 1.5f, g_ex, g_ey, n);
+    fv_vec2_madd_normalize_soa_fast(g_ax, g_ay, g_az, g_aw, 1.5f, g_fx, g_fy, n);
+    for (i = 0; i < n; ++i) {
+        CHECK(rel_ok(g_fx[i], g_ex[i], 1e-5f));
+        CHECK(rel_ok(g_fy[i], g_ey[i], 1e-5f));
+    }
+}
+
 int main(void)
 {
     size_t n;
@@ -173,11 +185,13 @@ int main(void)
     test_vec3(0); test_vec3(63); test_vec3(1024); test_vec3(4097);
     test_vec4(0); test_vec4(63); test_vec4(1024); test_vec4(4097);
     test_quat(0); test_quat(63); test_quat(1024); test_quat(4097);
+    test_madd_norm(0); test_madd_norm(63); test_madd_norm(1024); test_madd_norm(4097);
     for (n = 0; n <= 40; ++n) {
         test_vec2(n);
         test_vec3(n);
         test_vec4(n);
         test_quat(n);
+        test_madd_norm(n);
     }
 
     /* Unit length, checked separately on a larger batch. */
@@ -198,6 +212,7 @@ int main(void)
     fv_vec3_normalize_soa_fast(NULL, NULL, NULL, NULL, NULL, NULL, 0);
     fv_vec4_normalize_soa_fast(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
     fv_quat_normalize_soa_fast(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
+    fv_vec2_madd_normalize_soa_fast(NULL, NULL, NULL, NULL, 1.5f, NULL, NULL, 0);
 
     printf("test_fast: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

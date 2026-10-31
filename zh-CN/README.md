@@ -47,6 +47,8 @@ fv_vec2_add_x4(pos, vel, pos, N);
 
 包围盒另有 `fv_aabb2_merge` 和 `fv_aabb2_overlaps`。
 
+默认形态把每个标量函数体写成 header 里的 `static inline`，与批量内核共用同一个 `fp-contract=off` pragma；`FV_USE_EXTERN` 切到库内符号，两种形态逐位一致（`make test-scalar-parity`）。混合标量循环实测（`make bench-scalar`）：默认形态比 `FV_USE_EXTERN` 快 **1.70–1.82x**；`-mfma -ffp-contract=fast` 的消费者仍然 **0 条 `vfmadd`**。默认形态是 `static inline`；需要稳定的库符号 / 函数地址 / ABI 边界时用 `FV_USE_EXTERN`。`normalize` 即使内联也保留标量 `sqrt`/`div` 与零分支，追平它要用 `_fast` 族。
+
 `min` / `max` / `clamp` 的 NaN 语义是 `(a < b) ? a : b`，不是 IEEE 的 `fminf`。这一点写进了头文件。
 
 ## 批量 API
@@ -156,9 +158,9 @@ void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_v
 
 `fv_quat_from_mat3` 用 Shepperd 的“最大对角分支”法，假定输入是旋转矩阵；`fv_mat4_mul` / `fv_mat4_inverse` 是**通用** 4x4 运算（不只仿射），逆用伴随矩阵 / 行列式闭式解，奇异阈值同样是相对的（`|det| <= FV_EPS * max|entry|⁴`），按值版本返回零矩阵，`fv_mat4_inverse_checked` 返回 1 / 0 且允许 `out == m`。
 
-批量（SoA，每 ymm 8 个元素）：`fv_quat_mul_soa`、`fv_quat_normalize_soa`、`fv_quat_rotate_vec3_soa`、`fv_mat3_transform_vec3_soa`、`fv_mat3_mul_soa`、`fv_mat3_inverse_soa`。前六个对任意 n 与尾长都与逐值 API 逐位一致；mat3 乘 / 逆是九路 gather/scatter，按设计保持标量循环，批量收益来自去掉跨 TU 调用边界。`fv_vec2/vec3/vec4_normalize_soa_fast` 与 `fv_quat_normalize_soa_fast` 是独立的近似族（`rsqrtps` + 一次牛顿迭代，约 1–2 ulp，标量回退用精确 `1/sqrtf`），不承诺与精确入口逐位一致。
+批量（SoA，每 ymm 8 个元素）：`fv_quat_mul_soa`、`fv_quat_normalize_soa`、`fv_quat_rotate_vec3_soa`、`fv_mat3_transform_vec3_soa`、`fv_mat3_mul_soa`、`fv_mat3_inverse_soa`。前六个对任意 n 与尾长都与逐值 API 逐位一致；mat3 乘 / 逆现在有独立 AVX2 内核：乘把 9 个 B 列常驻寄存器、每次算 3 个输出行；逆每 8 个元素只做一次 `vdivps(1/det)`（而不是 9 次标量除法），奇异 lane 用 blend 写零。尾长仍走标量，逐位不变。本地 `make bench-mat3`（P0 后的默认内联标量基线）：乘 8192 4.9x、1M 3.1x；逆 9.7x、2.7x。相对旧的 `FV_USE_EXTERN` 标量形态，同一批内核测得 13.3x / 3.5x 与 14.7x / 3.2x。这些是本地基线，不是 GLM 报告的比值。`fv_vec2/vec3/vec4_normalize_soa_fast` 与 `fv_quat_normalize_soa_fast` 是独立的近似族（`rsqrtps` + 一次牛顿迭代，约 1–2 ulp，标量回退用精确 `1/sqrtf`），不承诺与精确入口逐位一致。
 
-实现：quat 乘 / 旋转、mat3 变换是 `target("avx2")` 里的纯 C，GCC 自动向量化成 256 位且零 shuffle（实测 40 / 40 / 21 条 AVX2 指令，0 个 `vpermps`/`vshufps`）；quat normalize 是编译器唯一没向量化的（保留 `sqrtss`/`divss` 与分支），因此单独写了 AVX2 内核（29 条 ymm）。`_fast` 族用 `rsqrtps` + 一次牛顿迭代；`fv_atan_approx` 是 `[-1,1]` 上的 5 项多项式（最大绝对误差约 1.2e-5，域外返回 NaN）。
+实现：quat 乘 / 旋转、mat3 变换是 `target("avx2")` 里的纯 C，GCC 自动向量化成 256 位且零 shuffle（实测 40 / 40 / 21 条 AVX2 指令，0 个 `vpermps`/`vshufps`）；quat normalize 是编译器唯一没向量化的（保留 `sqrtss`/`divss` 与分支），因此单独写了 AVX2 内核（29 条 ymm）。`_fast` 族用 `rsqrtps` + 一次牛顿迭代；`fv_vec2_madd_normalize_soa_fast` 是融合近似路径，8192 档比精确融合快 1.07x，1M 档在 A/A 噪声内。精确融合入口另有**可选 AVX-512 backend**：`target("avx512f")` 的 16-lane 内核，运行时由 `__builtin_cpu_supports("avx512f")` 选择；AVX2 路径不变，`FV_I_NO_AVX512` 可移除。本机没有 AVX-512，只验证了 codegen（存在 `vrsqrt14ps` / `zmm`），运行时路径仍需 AVX-512 硬件验证。`fv_atan_approx` 是 `[-1,1]` 上的 5 项多项式（最大绝对误差约 1.2e-5，域外返回 NaN）。
 
 初步测量（`make bench-physics`，同进程交错 A/B，11 轮配对，`taskset -c 0`，两次运行中位数；A/A 地板 8192 约 0.99–1.00、1M 约 0.93–1.07）：
 
@@ -169,7 +171,7 @@ void fv_vec2_maddv_x4(const fv_vec2* a, const fv_vec2* b, const fv_vec2* c, fv_v
 | `fv_quat_rotate_vec3_soa` | 25.8x | 3.39–3.57x |
 | `fv_mat3_transform_vec3_soa` | 24.7–25.1x | 3.33–3.80x |
 
-基线是逐元素库调用（跨 TU、不可内联）。这些是初步数据，尚未走五条验收标准。
+这些表测于 P0 之前：基线是 **`FV_USE_EXTERN`** 标量形态（跨 TU 调用）。P0 之后默认标量形态是 header 内联，批量相对默认标量的比值会更小；表仍对旧/extern 基线有效。这些是初步数据，尚未走五条验收标准。
 
 ## 语义承诺
 
@@ -266,7 +268,7 @@ L3 是 **4 MiB per CCX**，两个 CCX 合计 8 MiB。单线程只能用到自己
 
 ### 相对标量调用的加速比
 
-基线是**逐元素调用库里的标量函数**，那是跨 TU 调用、无法内联的写法。如果换成手写 C 循环并在同一编译单元内编译，GCC 会自动向量化，差距会小得多（`dot` 只剩 4 倍左右）。
+下表用历史基线：**`FV_USE_EXTERN` 形态的逐元素库调用**（跨 TU、不可内联）。P0 之后默认标量形态已是 header 内联，同 TU 的循环也会自动向量化；表保留为旧基线记录，不再代表默认形态的比值。`make bench-scalar` 直接测两种标量形态（混合负载 1.70–1.82x）。
 
 N = 8192，每数组 32 KB，L2 驻留：
 
@@ -358,19 +360,25 @@ N = 8192，每数组 32 KB，L2 驻留：
 
 ### 读这些数字时要注意
 
-- 加速比必须连同工作集大小一起报。N = 1<<20（24 MB）时三档实现收敛到 1.0–1.5x，因为都受限于本机 6–7 GB/s 的流带宽；批量相对标量的比值会更大，因为那个基线是跨 TU 调用，见上面的三维 / 四维表。
-- 收益主要来自消除跨 TU 调用边界，不是 intrinsics。同一份数学放进头文件内联后，`-O3 -march=native` 的自动向量化几乎追平手写 AVX2。
+- 加速比必须连同工作集大小一起报。N = 1<<20（24 MB）时三档实现收敛到 1.0–1.5x，因为都受限于本机 6–7 GB/s 的流带宽；历史上批量相对标量的比值更大，因为那个基线是 `FV_USE_EXTERN` 跨 TU 调用。P0 之后默认标量已内联，引用时必须说明基线。
+- 历史收益主要来自消除跨 TU 调用边界，不是 intrinsics。同一份数学放进头文件内联后，`-O3 -march=native` 的自动向量化几乎追平手写 AVX2；P0 把这条结论用到了标量 API 自身。
 - 这台机器长期有外部负载，同一份代码跨运行可差 20–25%。不同夹具的绝对值不要直接比，只看同一次运行内的比值。
 - 三维 / 四维批量的绝对加速比现在由 `make bench-vec34` 测量（见上表）；引用时带上 harness 与工作集，不要当成单点精确倍数。
 - AoS↔SoA 拆装由 `make bench-pack` 测量：往返成本在 n=8192 约 0.28–0.32 ns/元素、n=1M 约 4.2–4.4 ns/元素。AoS 输入下，`pack + add_soa + unpack` 在 8192 比 `fv_vec2_add_x4` 慢 2.5 倍、1M 慢 3.1 倍；normalize 在 8192 仍快 3.9 倍，但 1M 慢 2.3 倍。SoA 入口适合数据本来就是 SoA，或数据驻留 cache 且运算足够贵的情况。
 
 判定标准见 `docs/acceptance-protocol.md`。原始判定表在 `docs/research/raw/ab_campaign_verdict.txt`，每次 `make run` 会覆盖，引用时请连同时刻。
 
+### 小批量与流式写入的可移植性
+
+- 批量 API 面向 **n >= 4**。外部 GLM 报告实测：n=1 约打平，n=2 约 0.59x，n=4 起 2x 以上；小于 4 个元素时调用/守卫开销就是全部成本，建议直接用标量 API。
+- `_stream` 的符号不跨机可移植：只有工作集超过 L3 且机器受 RFO 限制时才赚；在带宽充裕、read-bound 的机器上会亏（报告机器 0.47–1.03x）。库不会自动切换，先用 `bench/membw.c` 实测。
+- 编译档对 GLM 自动向量化的影响远大于 flashvec 的手写内核：报比值必须固定 `-O2` 或 `-O3 -march=native`，不要跨档比较单点。
+
 ## 构建与测试
 
 ```bash
 make                         # build/libflashvec.a
-make test-all                # 全量套件：1.86M 项检查（tests/count_checks.sh 可复算）
+make test-all                # 全量套件：1.97M 项检查（tests/count_checks.sh 可复算）
 
 make test-header             # 严格编译档 + 双重包含
 make test-inline             # 默认形态 vs FV_USE_EXTERN 形态逐字节对拍
@@ -387,6 +395,8 @@ make bench-physics           # 逐元素调用 vs SoA 批量，同进程 A/B
 make bench-fast              # 精确 vs _fast normalize
 make bench-vec34             # 三维 / 四维相对标量调用的绝对加速比
 make bench-pack              # AoS↔SoA 拆装成本与 SoA 判断规则
+make bench-mat3              # mat3 AVX2 乘/逆 vs 逐元素标量调用
+make bench-scalar            # 标量 header 内联 vs FV_USE_EXTERN 库调用
 make test-vec4               # 四维标量与批量
 make test-vec34-inline       # 三维/四维批量形态对拍
 make test-refactor           # 以上全部 + 导出符号清单 + 反汇编普查
@@ -414,7 +424,7 @@ AVX2 只在头文件里用函数级 `target("avx2")` 属性加运行时 `__built
 
 ### 批量入口放在头文件里
 
-跨 TU 调用边界是实测的一阶瓶颈，而链接静态库的调用方无法消除它。
+跨 TU 调用边界曾是实测的一阶瓶颈，链接静态库的调用方无法消除它；把函数体搬进 header 就是修法。
 所以实现只写一份，放在头文件里；`src/flashvec_batch.cpp` 保留同名 `extern` 符号，供 `FV_USE_EXTERN` 形态和已经编译好的旧调用方使用。
 
 代价是头文件会在支持的目标上条件包含 `<immintrin.h>`。用纯 C 编译器或者定义 `FV_USE_EXTERN` 时，它仍然只是一个纯声明头文件。
@@ -429,8 +439,8 @@ AVX2 只在头文件里用函数级 `target("avx2")` 属性加运行时 `__built
 
 ## 范围
 
-库现在覆盖了向量类型及其标量 / 批量 API、四元数、3x3 与通用 4x4 矩阵、四元数插值与角度构造、`_fast` 近似 normalize 族，以及 `fv_atan_approx`。本文档不再保留待办清单。
+库现在覆盖了向量类型及其标量 / 批量 API、四元数、3x3 与通用 4x4 矩阵、四元数插值与角度构造、`_fast` 近似 normalize 族、`fv_atan_approx`，以及融合 madd-normalize 的可选 AVX-512 路径。本文档不再保留待办清单。
 
-以下内容是**有意不做**（不是待办）：线程 / 调度等引擎设施、分配器或 arena 所有权（库从不分配）、双精度批量族、以及每个入口的 `_fast` 版本（目前只有 normalize）。这些会改变值语义 / 无分配契约，而不是补全它。
+以下内容是**有意不做**（不是待办）：线程 / 调度等引擎设施、分配器或 arena 所有权（库从不分配）、双精度批量族、以及每个入口的 `_fast` 版本（目前只有 normalize 与融合 madd-normalize）。这些会改变值语义 / 无分配契约，而不是补全它。
 
 更多分析见 `docs/optimization-report.md`。哪些方向已经实测过、结论是什么，见 `docs/acceptance-protocol.md` 的 §9。

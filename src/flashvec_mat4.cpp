@@ -1,3 +1,4 @@
+#define FV_BUILD 1
 /* General 4x4 matrix operations -- the P7 completion of the mat4 surface.
  *
  * Row-major (m[row*4 + col], the same convention as fv_mat3 and fv_mat4_transform_*), general 4x4

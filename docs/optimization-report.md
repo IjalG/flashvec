@@ -16,6 +16,13 @@
 
 ---
 
+> **Post-P0 note (2026-10-31):** this report's scalar API baseline is the pre-P0 `.cpp` form (a
+> cross-TU call). P0 moved the scalar bodies into the header as `static inline` under the same
+> `fp-contract=off` pragma, so the default scalar form now inlines and auto-vectorizes; the
+> `FV_USE_EXTERN` form retains the old baseline. The historical ratios here remain valid for that
+> extern baseline, but batch-vs-default-scalar ratios are smaller.
+
+
 ## 0. One-Page Summary
 
 **Five conclusions** (ordered by "how much do I get back if I change this"):

@@ -108,11 +108,64 @@ test-batch: $(BUILD)/test_batch $(BUILD)/test_batch_c
 	./$(BUILD)/test_batch
 	./$(BUILD)/test_batch_c
 
-test-all: test test-p0 test-batch test-mat4 test-mat4-c test-mat4-inline test-mat4-fma \
+$(BUILD)/scalar_parity_inline: tests/test_scalar_parity.c $(LIB) include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIB) -o $@ -lm
+
+$(BUILD)/scalar_parity_extern: tests/test_scalar_parity.c $(LIB) include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DFV_USE_EXTERN $< $(LIB) -o $@ -lm
+
+$(BUILD)/scalar_parity_fma: tests/test_scalar_parity.c $(LIB) include/flashvec.h | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -mfma -ffp-contract=fast $< $(LIB) -o $@ -lm
+
+test-scalar-parity-fma: $(BUILD)/scalar_parity_inline $(BUILD)/scalar_parity_fma
+	./$(BUILD)/scalar_parity_inline $(BUILD)/scalar_inline.bin
+	./$(BUILD)/scalar_parity_fma $(BUILD)/scalar_fma.bin
+	cmp $(BUILD)/scalar_inline.bin $(BUILD)/scalar_fma.bin
+	@if objdump -d $(BUILD)/scalar_parity_fma | grep -q vfmadd; then echo "FAIL  vfmadd in scalar FMA consumer"; exit 1; fi
+	@echo "PASS  scalar FMA consumer: bit-identical, 0 vfmadd"
+
+$(BUILD)/scalar_parity_cpp: tests/test_scalar_parity.c $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) -x c++ $(CXXFLAGS) $< -x none $(LIB) -o $@ -lm
+
+test-scalar-parity-cpp: $(BUILD)/scalar_parity_inline $(BUILD)/scalar_parity_cpp
+	./$(BUILD)/scalar_parity_inline $(BUILD)/scalar_inline.bin
+	./$(BUILD)/scalar_parity_cpp $(BUILD)/scalar_cpp.bin
+	cmp $(BUILD)/scalar_inline.bin $(BUILD)/scalar_cpp.bin
+	@echo "PASS  C scalar inline == C++ scalar inline (bit for bit)"
+
+test-scalar-parity: $(BUILD)/scalar_parity_inline $(BUILD)/scalar_parity_extern
+	./$(BUILD)/scalar_parity_inline $(BUILD)/scalar_inline.bin
+	./$(BUILD)/scalar_parity_extern $(BUILD)/scalar_extern.bin
+	cmp $(BUILD)/scalar_inline.bin $(BUILD)/scalar_extern.bin
+	@echo "PASS  scalar inline == scalar extern (bit for bit)"
+
+$(BUILD)/bench_scalar_inline.o: tests/bench_scalar.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+$(BUILD)/bench_scalar_extern.o: tests/bench_scalar.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -DFV_USE_EXTERN -DBENCH_EXTERN -DBENCH_NO_MAIN -c $< -o $@
+
+$(BUILD)/bench_scalar: $(BUILD)/bench_scalar_inline.o $(BUILD)/bench_scalar_extern.o $(LIB)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+bench-scalar: $(BUILD)/bench_scalar
+	./$(BUILD)/bench_scalar
+
+$(BUILD)/avx512_codegen.o: tests/test_fast.cpp include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+
+test-avx512-codegen: $(BUILD)/avx512_codegen.o
+	@if ! objdump -d $(BUILD)/avx512_codegen.o | grep -q 'zmm'; then echo "FAIL  no AVX-512 code emitted"; exit 1; fi
+	@if ! objdump -d $(BUILD)/avx512_codegen.o | grep -q 'vrsqrt14ps'; then echo "FAIL  no vrsqrt14ps"; exit 1; fi
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -DFV_I_NO_AVX512 -c tests/test_fast.cpp -o $(BUILD)/avx512_off.o
+	@if objdump -d $(BUILD)/avx512_off.o | grep -q 'zmm'; then echo "FAIL  zmm still present with FV_I_NO_AVX512"; exit 1; fi
+	@echo "PASS  AVX-512 codegen present; FV_I_NO_AVX512 removes it (runtime path needs AVX-512 hardware)"
+
+test-all: test test-p0 test-scalar-parity test-scalar-parity-fma test-scalar-parity-cpp test-batch test-mat4 test-mat4-c test-mat4-inline test-mat4-fma \
           test-maddnorm test-maddnorm-c test-maddnorm-inline test-maddnorm-fma \
           test-addmul test-addmul-c test-addmul-inline test-addmul-fma \
           test-stream test-stream-parity test-stream-parity-fma \
-          test-physics test-mat4-ops test-fast
+          test-physics test-mat4-ops test-fast test-fast-extern test-avx512-codegen
 
 # ------------- Acceptance targets for the header-inline form (P1 refactor): append-only; not one command of the targets above was changed -------------
 #   make test-header          strict compile profile (C11 -pedantic-errors / C++17 -Wpedantic); double inclusion in one TU;
@@ -644,7 +697,7 @@ bench-addmul: $(BUILD)/bench_addmul
 #   test-physics-c   plain C11 caller: scalar API links, batch entries compile and are bit-identical
 #   test-physics     all of the above forms (this is what test-all depends on)
 #   bench-physics    scalar-per-element vs SoA batch, same-process A/B, 11 paired rounds + A/A control
-.PHONY: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma test-physics test-mat4-ops test-fast bench-physics bench-fast bench-vec34 bench-pack
+.PHONY: test-quat test-mat3 test-physics-c test-physics-extern test-physics-pure test-physics-fma test-physics test-mat4-ops test-fast bench-physics bench-fast bench-vec34 bench-pack bench-mat3 bench-scalar
 
 $(BUILD)/flashvec_quat.o: src/flashvec_quat.cpp include/flashvec.h | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
@@ -743,6 +796,12 @@ test-mat4-ops: $(BUILD)/test_mat4_ops
 $(BUILD)/test_fast: tests/test_fast.cpp $(LIB) include/flashvec.h | $(BUILD)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
 
+$(BUILD)/test_fast_extern: tests/test_fast.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -DFV_USE_EXTERN $< $(LIB) -o $@
+
+test-fast-extern: $(BUILD)/test_fast_extern
+	./$(BUILD)/test_fast_extern
+
 test-fast: $(BUILD)/test_fast
 	./$(BUILD)/test_fast
 
@@ -769,3 +828,9 @@ $(BUILD)/bench_pack: tests/bench_pack.cpp $(LIB) include/flashvec.h | $(BUILD)
 
 bench-pack: $(BUILD)/bench_pack
 	./$(BUILD)/bench_pack
+
+$(BUILD)/bench_mat3: tests/bench_mat3.cpp $(LIB) include/flashvec.h | $(BUILD)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LIB) -o $@
+
+bench-mat3: $(BUILD)/bench_mat3
+	./$(BUILD)/bench_mat3

@@ -415,7 +415,8 @@ rig, not a missing library feature.
 - **`fv_atan_approx` is domain-limited**: [-1,1], max abs error about 1.2e-5, NaN outside the domain
   (clamping would silently return a wrong angle).
 - **mat3 batch mul/inverse stay scalar**: nine input arrays and nine output arrays are a
-  gather/scatter pattern the compiler cannot vectorize; the batch win is the removed call boundary.
+  pattern; P0/P1 replaced it with real AVX2 kernels (see below), so the batch win is now SIMD width
+  as well as the removed call boundary.
   The mat3 inverse helper uses the same determinant/threshold/cofactor expressions as the scalar
   function, so the batch output is bit-identical.
 
@@ -426,10 +427,10 @@ rig, not a missing library feature.
 | `make test-quat` | 30,359 checks, 0 failures (inverse, from_mat3, nlerp/slerp, axis-angle, Euler, batch parity) |
 | `make test-mat3` | 122,344 checks, 0 failures (scalar + batch mul/inverse, singular paths, bit parity) |
 | `make test-mat4-ops` | 8,016 checks, 0 failures (mul reference, inverse identity, singular, alias) |
-| `make test-fast` | 81,241 checks, 0 failures (atan on [-1,1] vs atanf, fast vs exact relative error, guard) |
+| `make test-fast` | 93,249 checks, 0 failures (atan on [-1,1] vs atanf, fast vs exact relative error, fused fast, guard) |
 | `make test-physics-c` | 4,093 checks, 0 failures in three forms (C11 inline / `FV_USE_EXTERN` / pure-C) |
 | FMA consumer | `test_quat` / `test_mat3` compile with `-march=native -mfma -ffp-contract=fast`; `vfmadd = 0` |
-| `make test-all` | 1,864,380 total checks, 0 failures |
+| `make test-all` | 1,969,641 total checks, 0 failures |
 
 ### 9.4 Measurements
 
@@ -465,3 +466,68 @@ The explicit backlog is empty. The library deliberately does **not** include thr
 allocation or arena ownership, a double-precision batch family, or `_fast` variants of every entry;
 those would change the value-semantics / no-allocation contract rather than complete it. They are
 scope decisions, not pending work.
+
+
+## 10. P0-P3: the GLM report follow-up
+
+The external GLM report (2026-10-31, 115 items x 3 compile tiers x 3 sizes x 3 rounds) found the
+scalar API at a 0.40x median, mat3 batch mul/inverse at 0.48-0.98x, and a few environment-bound
+effects. Four items were implemented; the report's raw ratios still need re-running on its machine.
+
+### 10.1 P0: scalar API moved into the header
+
+The report's root cause was correct for the old structure (scalar bodies in `.cpp`, so LTO does not
+inline and the function pragma blocks cross-node inlining), but not a necessary cost of the pragma:
+a `static inline` body under `#pragma GCC optimize("fp-contract=off")` inlines in the same TU and
+still emits `vmulss + vaddss` (no `vfmadd`) under `-O3 -mfma -ffp-contract=fast` (GCC 12.4 probe).
+So every scalar body now has a header `static inline` definition inside the same pragma; the `.cpp`
+files compile with `FV_BUILD` and keep the extern symbols for `FV_USE_EXTERN` / ABI. The scalar
+declaration block is conditional on `FV_USE_EXTERN || FV_BUILD`.
+
+Evidence:
+
+- `tests/test_scalar_parity.c` compares ~90 scalar calls (vec2/3/4, quat, mat3, mat4, atan,
+  integrators) in default vs `FV_USE_EXTERN`: byte-for-byte equal.
+- `make test-scalar-parity-fma`: default form compiled with `-mfma -ffp-contract=fast` is still
+  byte-identical and the object has **0 `vfmadd`**.
+- `make bench-scalar` (mixed vec2 add/lerp/madd/dot/normalize + vec3 dot + mat3 transform):
+  inline is **1.82x** faster at n=8192 and **1.72x** at n=1M than the extern form (A/A floor included).
+- `fv_vec2_normalize` still keeps its scalar `sqrtss`/`divss` + zero branch (GCC will not vectorize
+  it even inline); P0 removes the call boundary, not that branch. The `_fast` family is the opt-in
+  approximate path.
+
+### 10.2 P1: AVX2 mat3 mul / inverse
+
+`fv_mat3_mul_soa`: 9 B columns live in ymm, three A rows loaded one at a time, three output rows
+stored per row-group (15 ymm live). `fv_mat3_inverse_soa`: determinant + cofactors, one
+`vdivps(1/det)` per 8 elements, mask/blend zero for singular lanes, scalar tail. Both stay
+bit-identical (test_mat3: 122,344 checks).
+
+`make bench-mat3` (vs per-element `fv_mat3_mul` / `fv_mat3_inverse` calls, 11 paired rounds):
+with the post-P0 **inline** scalar baseline, mul **4.9x** at 8192 and **3.1x** at 1M; inverse **9.7x**
+and **2.7x**. Against the old `FV_USE_EXTERN` baseline the same kernels measured 13.3x / 3.5x and
+14.7x / 3.2x. These are local scalar-call baselines, not the report's GLM ratios; the report's
+`m3_mul_soa` 0.48x at -O2 should be re-measured.
+
+### 10.3 P2: fused fast normalize + optional AVX-512
+
+`fv_vec2_madd_normalize_soa_fast` (rsqrtps + one NR, squared guard, exact scalar fallback) is
+**1.07x** over the exact fused entry at 8192; at 1M it is inside the A/A spread. The exact fused
+entry gained an optional 16-lane AVX-512 kernel (and the fast fused one too), selected at run time
+by `__builtin_cpu_supports("avx512f")`; `FV_I_NO_AVX512` removes it. This machine is AVX2-only:
+`objdump` confirms 41 `zmm` uses and `vrsqrt14ps`, but the runtime path has not executed on AVX-512
+hardware. That is a hardware-availability limit, not a pending library item; the report's cloud
+Xeon is the validation target.
+
+### 10.4 P3: batch sizing and streaming portability
+
+Documented in README: batch targets n >= 4 (report: n=1 tie, n=2 0.59x, n=4+ 2x); `_stream` is
+hardware-dependent (0.47-1.03x on the report's bandwidth-rich machine), never auto-selected; compile
+tier must be fixed when quoting GLM ratios.
+
+### 10.5 Verification
+
+`make test-all`: **1,969,641 checks, 0 failures**. New: `test-scalar-parity` (C, default vs extern,
+bit-for-bit), `test-scalar-parity-fma` (0 `vfmadd`), test-fast 93,249, mat3 122,344. Header/inline/
+pure-C/FMA forms remain green. The GLM report's 115-item matrix has not been re-run (its `fvbench/`
+source is external); that is the next measurement, not a code item.

@@ -38,3 +38,11 @@ void fv_quat_normalize_soa_fast(const float *__restrict ax, const float *__restr
 {
     fv_i_quat_normalize_soa_fast(ax, ay, az, aw, ox, oy, oz, ow, n);
 }
+
+void fv_vec2_madd_normalize_soa_fast(const float *__restrict ax, const float *__restrict ay,
+                                     const float *__restrict bx, const float *__restrict by,
+                                     fv_real s, float *__restrict ox, float *__restrict oy,
+                                     size_t n)
+{
+    fv_i_vec2_madd_normalize_soa_fast(ax, ay, bx, by, s, ox, oy, n);
+}

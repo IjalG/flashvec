@@ -5,9 +5,8 @@
  *      while the implementation section still compiles (that section is controlled by !FV_USE_EXTERN, and FV_BUILD does not exclude it);
  *   2) give each batch entry point an extern symbol whose one-line body forwards to the same-named fv_i_*;
  *   3) define the four per-value integrator primitives (fv_vec2_addmul / fv_vec3_addmul / fv_vec4_addmul / fv_vec2_maddv).
- *      They are scalar API, so they belong in the library rather than in the header; they live at the end of this file
- *      because this is the in-library unit that the integrator group touches, and they carry the same fp-contract=off
- *      pragma the other scalar definitions carry (src/flashvec.cpp, src/flashvec_vec4.cpp).
+ *      Their header inline bodies are part of P0; this file keeps the same-named extern symbols for FV_USE_EXTERN / ABI.
+ *      They live at the end of this file because this is the in-library unit that the integrator group touches.
  *
  * Why these symbols remain: binary compatibility. Old consumers (already-built .o/.so files calling the extern names) keep linking;
  * new consumers get the header's static inline by default and never reference these symbols at link time.

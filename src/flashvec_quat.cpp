@@ -1,3 +1,4 @@
+#define FV_BUILD 1
 /* The scalar implementation of fv_quat -- the rotation half of the physics primitives.
  *
  * Written the same way as src/flashvec.cpp / src/flashvec_vec4.cpp: compiled as C++, C language subset

@@ -23,7 +23,7 @@ static double now_ns(void)
 
 static size_t g_n;
 static volatile double g_sink;
-static float *g_ax, *g_ay, *g_az;
+static float *g_ax, *g_ay, *g_az, *g_bx, *g_by;
 static float *g_ex, *g_ey, *g_ez;
 static float *g_fx, *g_fy, *g_fz;
 
@@ -33,6 +33,8 @@ static void vec2_exact(size_t n) { fv_vec2_normalize_soa(g_ax, g_ay, g_ex, g_ey,
 static void vec2_fast(size_t n) { fv_vec2_normalize_soa_fast(g_ax, g_ay, g_fx, g_fy, n); }
 static void vec3_exact(size_t n) { fv_vec3_normalize_soa(g_ax, g_ay, g_az, g_ex, g_ey, g_ez, n); }
 static void vec3_fast(size_t n) { fv_vec3_normalize_soa_fast(g_ax, g_ay, g_az, g_fx, g_fy, g_fz, n); }
+static void madd_exact(size_t n) { fv_vec2_madd_normalize_soa(g_ax, g_ay, g_bx, g_by, 1.5f, g_ex, g_ey, n); }
+static void madd_fast(size_t n) { fv_vec2_madd_normalize_soa_fast(g_ax, g_ay, g_bx, g_by, 1.5f, g_fx, g_fy, n); }
 
 using Fn = void (*)(size_t);
 
@@ -112,18 +114,21 @@ int main(void)
     for (si = 0; si < sizeof kSizes / sizeof kSizes[0]; ++si) {
         size_t n = kSizes[si];
         size_t cap = n + 8u;
-        std::vector<float> ax(cap), ay(cap), az(cap);
+        std::vector<float> ax(cap), ay(cap), az(cap), bx(cap), by(cap);
         std::vector<float> ex(cap), ey(cap), ez(cap);
         std::vector<float> fx(cap), fy(cap), fz(cap);
         size_t i;
 
         for (i = 0; i < cap; ++i) {
+            bx[i] = (float)((i * 11) % 17) / 8.0f - 1.0f;
+            by[i] = (float)((i * 13) % 19) / 8.0f - 1.0f;
             ax[i] = (float)((i * 3) % 23) / 8.0f - 1.0f;
             ay[i] = (float)((i * 5) % 19) / 8.0f - 1.0f;
             az[i] = (float)((i * 7) % 17) / 8.0f - 1.0f;
         }
         g_n = n;
         g_ax = ax.data(); g_ay = ay.data(); g_az = az.data();
+        g_bx = bx.data(); g_by = by.data();
         g_ex = ex.data(); g_ey = ey.data(); g_ez = ez.data();
         g_fx = fx.data(); g_fy = fy.data(); g_fz = fz.data();
 
@@ -133,6 +138,8 @@ int main(void)
         run_pair("vec2 A/B", vec2_fast, vec2_exact);
         run_pair("vec3 A/A", vec3_fast, vec3_fast);
         run_pair("vec3 A/B", vec3_fast, vec3_exact);
+        run_pair("madd A/A", madd_fast, madd_fast);
+        run_pair("madd A/B", madd_fast, madd_exact);
     }
 
     printf("\nchecksum sink = %.6f (keeps the timed loops alive)\n", (double)g_sink);

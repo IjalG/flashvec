@@ -1,3 +1,4 @@
+#define FV_BUILD 1
 /* The scalar implementation of fv_vec4 -- written the same way as src/flashvec.cpp (compiled as C++, C language subset only,
  * no global state, no allocation), with the component count extended from 2/3 to 4.
  *
